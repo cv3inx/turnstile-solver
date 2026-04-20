@@ -1,0 +1,11 @@
+.git
+.github
+__pycache__
+*.pyc
+*.bak
+*.log
+node_modules
+README.md
+LICENSE
+ecosystem.config.js
+clientsend.py

@@ -1,0 +1,23 @@
+services:
+  solver:
+    build: .
+    container_name: violetics-solver
+    restart: unless-stopped
+    ports:
+      - "9988:9988"
+    environment:
+      MAX_WORKERS: "8"
+      PORT: "9988"
+    volumes:
+      # persist the Chromium profile so Cloudflare cookies survive restarts
+      - solver-profile:/tmp/ts_profile
+    shm_size: "1gb"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9988/health',timeout=2).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  solver-profile:
