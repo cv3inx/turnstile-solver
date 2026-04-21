@@ -8,8 +8,12 @@ services:
     environment:
       MAX_WORKERS: "8"
       PORT: "9988"
+      # Delegate CF JS-challenge clearance to FlareSolverr. nodriver on this
+      # host is fingerprinted by CF (the Turnstile iframe never mounts), so
+      # the interactive click path cannot work. FlareSolverr uses its own
+      # stealth Chromium and reliably clears the same URLs.
+      FLARESOLVERR_URL: "http://172.17.0.1:8191"
     volumes:
-      # persist the Chromium profile so Cloudflare cookies survive restarts
       - solver-profile:/tmp/ts_profile
     shm_size: "1gb"
     healthcheck:

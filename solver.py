@@ -2,19 +2,27 @@
 Cloudflare Turnstile + JS-Challenge ("Just a moment...") solver.
 
 Design notes:
-  - Single warm browser, persistent profile — fresh profiles get hard
+  - Single warm browser, persistent profile - fresh profiles get hard
     challenges from Cloudflare (~45s) while a warm profile typically
     clears in 5-10s.
   - Tab-per-request via new_tab=True, closed after solve.
   - Solves are internally serialised with a lock: concurrent tabs hitting
     the same sitekey cause CF to escalate difficulty, so real parallelism
-    is not practical. HTTP callers can still fire in parallel — requests
+    is not practical. HTTP callers can still fire in parallel - requests
     queue here.
   - No hardcoded sleeps. Event-driven waits on readyState, turnstile
     global, token, or cf_chl_opt absence.
   - Two public entry points:
         solve_async(sitekey, siteurl) -> str
         solve_challenge_async(siteurl) -> dict   # cleared cookies + html
+
+  - solve_challenge_async optionally delegates to a FlareSolverr instance
+    when FLARESOLVERR_URL is set. nodriver/patchright on headless
+    Linux hosts are reliably fingerprinted by current Cloudflare deploys
+    (the Turnstile iframe never mounts, so there is nothing to click),
+    while FlareSolverr ships its own stealth Chromium build that still
+    clears these pages. Fall back to the in-process browser only when
+    FlareSolverr is unreachable or explicitly disabled.
 """
 
 import asyncio
@@ -27,7 +35,9 @@ import subprocess
 import sys
 import time
 from typing import Optional
+from urllib.parse import urlparse
 
+import aiohttp
 import nodriver as uc
 
 
@@ -42,19 +52,11 @@ def _step(req_id: str, msg: str):
 # ---------- Chrome / Xvfb discovery ----------
 
 def _find_chrome() -> str:
-    """Locate a Chrome/Chromium binary.
-
-    Search order:
-      1. $CHROME_PATH
-      2. Playwright/Patchright-managed chromium under ~/.cache/ms-playwright/
-         (pattern: chromium-*/chrome-linux*/chrome or chrome-linux/headless_shell)
-      3. System chromium/chrome binaries
-    """
+    """Locate a Chrome/Chromium binary."""
     import glob
     if os.environ.get("CHROME_PATH"):
         return os.environ["CHROME_PATH"]
 
-    # Playwright/Patchright location — default install target.
     pw_roots = [
         os.path.expanduser("~/.cache/ms-playwright"),
         "/root/.cache/ms-playwright",
@@ -118,7 +120,6 @@ def _start_xvfb_if_needed() -> Optional[subprocess.Popen]:
 # ---------- Event-driven waits ----------
 
 async def _wait_for_eval(tab, expr: str, timeout: float, poll: float = 0.1) -> bool:
-    """Poll an expression until truthy. Returns True if matched, False if timed out."""
     deadline = asyncio.get_event_loop().time() + timeout
     while asyncio.get_event_loop().time() < deadline:
         try:
@@ -140,9 +141,7 @@ async def _wait_ready(tab, timeout: float = 15.0):
 class BrowserSingleton:
     def __init__(self, max_concurrent: int):
         self.browser: Optional[uc.Browser] = None
-        # HTTP concurrency — callers can enter together, but solves serialise via solve_lock
         self.sem = asyncio.Semaphore(max_concurrent)
-        # Serialises actual solve work (concurrent solves on same sitekey trigger hard CF challenges)
         self.solve_lock = asyncio.Lock()
         self.max_concurrent = max_concurrent
         self._start_lock = asyncio.Lock()
@@ -159,7 +158,6 @@ class BrowserSingleton:
                 no_sandbox=True,
                 user_data_dir=_get_profile_dir(),
             )
-            # Park first target on about:blank so subsequent new_tab=True navigations are activated.
             try:
                 await self.browser.get("about:blank")
             except Exception:
@@ -351,14 +349,12 @@ _IS_CHALLENGE_JS = """
 
 _CF_WIDGET_RECT_JS = """
 JSON.stringify((() => {
-    // CF places its interactive widget inside an iframe sourced from challenges.cloudflare.com
     for (const f of document.querySelectorAll('iframe')) {
         const src = f.src || f.getAttribute('src') || '';
         if (!src.includes('challenges.cloudflare.com')) continue;
         const r = f.getBoundingClientRect();
         if (r.width > 50 && r.height > 20) return {x:r.x, y:r.y, w:r.width, h:r.height};
     }
-    // fallback: the wrapper div CF uses on its full-page challenge
     const el = document.querySelector('#hQLfM7, .main-wrapper .ch-title-zone + div');
     if (el) {
         const r = el.getBoundingClientRect();
@@ -369,9 +365,117 @@ JSON.stringify((() => {
 """
 
 
+def _match_host(target_host: str, cdomain: str) -> bool:
+    d = (cdomain or "").lstrip(".").lower()
+    h = (target_host or "").lower()
+    return bool(h) and (h == d or h.endswith("." + d))
+
+
+async def _solve_via_flaresolverr(siteurl: str, req_id: str, timeout: int) -> Optional[dict]:
+    """Delegate JS-challenge clearance to a running FlareSolverr instance.
+
+    FlareSolverr ships a stealth Chromium that reliably renders the CF
+    interactive widget in environments where nodriver is fingerprinted
+    (docker + Xvfb on VPS ranges CF has flagged). Returns the same shape
+    as the in-process path so callers are unchanged.
+    """
+    url = os.environ.get("FLARESOLVERR_URL", "").rstrip("/")
+    if not url:
+        return None
+    _step(req_id, f"delegating to FlareSolverr -> {url}")
+
+    # CF's challenge platform is sensitive to the exact URL — on this
+    # deployment api.sawit.biz.id/docs consistently times out inside FS
+    # while /docs/ and / succeed. When we see a non-slash-terminated path
+    # that has no query, try a trailing-slash variant as a second attempt.
+    candidates = [siteurl]
+    try:
+        u = urlparse(siteurl)
+        if u.path and not u.path.endswith("/") and "." not in u.path.rsplit("/", 1)[-1] and not u.query:
+            fixed = siteurl.rstrip() + "/"
+            if fixed != siteurl:
+                candidates.append(fixed)
+    except Exception:
+        pass
+
+    loop = asyncio.get_event_loop()
+    t0 = loop.time()
+    data = None
+    last_err = None
+    for i, try_url in enumerate(candidates):
+        if i:
+            _step(req_id, f"retrying with trailing slash -> {try_url}")
+        payload = {
+            "cmd": "request.get",
+            "url": try_url,
+            "maxTimeout": max(5000, timeout * 1000),
+        }
+        try:
+            conn_timeout = aiohttp.ClientTimeout(total=timeout + 15)
+            async with aiohttp.ClientSession(timeout=conn_timeout) as s:
+                async with s.post(f"{url}/v1", json=payload) as resp:
+                    body_text = await resp.text()
+                    if resp.status == 200:
+                        data = json.loads(body_text)
+                        if (data.get("status") or "").lower() == "ok":
+                            break
+                        last_err = f"flaresolverr: {data.get('message') or data}"
+                        data = None
+                        continue
+                    last_err = f"flaresolverr HTTP {resp.status}: {body_text[:300]}"
+        except asyncio.TimeoutError:
+            last_err = f"flaresolverr did not respond within {timeout + 15}s"
+
+    if data is None:
+        raise RuntimeError(last_err or "flaresolverr: unknown failure")
+
+    sol = data.get("solution") or {}
+    final_url = sol.get("url") or siteurl
+    target_host = urlparse(final_url).hostname or ""
+    raw_cookies = sol.get("cookies") or []
+    cookies = []
+    for c in raw_cookies:
+        if not _match_host(target_host, c.get("domain", "")):
+            continue
+        cookies.append({
+            "name": c.get("name"),
+            "value": c.get("value"),
+            "domain": c.get("domain"),
+            "path": c.get("path", "/"),
+            "expires": c.get("expiry", -1),
+        })
+
+    html = sol.get("response") or ""
+    title = ""
+    low = html.lower()
+    a = low.find("<title")
+    if a != -1:
+        b = low.find(">", a)
+        c_ = low.find("</title>", b)
+        if b != -1 and c_ != -1:
+            title = html[b + 1:c_].strip()
+
+    _step(req_id, f"flaresolverr cleared ({loop.time() - t0:.1f}s, cookies={len(cookies)})")
+    return {
+        "url": final_url,
+        "title": title,
+        "user_agent": sol.get("userAgent") or "",
+        "cookies": cookies,
+        "html": html,
+    }
+
+
 async def solve_challenge_async(siteurl: str, req_id: str = "-",
                                  timeout: int = 45) -> dict:
-    """Open page, wait for CF challenge (JS or interactive Turnstile) to clear, return cookies + final html."""
+    """Open page, wait for CF challenge to clear, return cookies + final html."""
+    if os.environ.get("FLARESOLVERR_URL"):
+        try:
+            result = await _solve_via_flaresolverr(siteurl, req_id, timeout)
+            if result is not None:
+                return result
+        except Exception as e:
+            _step(req_id, f"flaresolverr failed, falling back to nodriver: {e}")
+
     pool = await get_pool()
     async with pool.sem:
         async with pool.solve_lock:
@@ -390,7 +494,6 @@ async def solve_challenge_async(siteurl: str, req_id: str = "-",
                 await _wait_ready(tab, timeout=10)
                 _step(req_id, f"page loaded ({loop.time() - t0:.1f}s)")
 
-                # keep polling until challenge gone; click CF iframe if interactive
                 deadline = t0 + timeout
                 cleared = False
                 attempts = 0
@@ -436,22 +539,14 @@ async def solve_challenge_async(siteurl: str, req_id: str = "-",
                 title = await tab.evaluate("document.title")
                 user_agent = await tab.evaluate("navigator.userAgent")
                 html = await tab.get_content()
-                # Pull only cookies relevant to the requested site — the profile
-                # is shared across solves so get_all() leaks cookies from prior
-                # targets (e.g. instveed) into unrelated responses.
-                from urllib.parse import urlparse
                 target_host = urlparse(final_url or siteurl).hostname or ""
-                def _matches(cdomain: str) -> bool:
-                    d = cdomain.lstrip(".").lower()
-                    h = target_host.lower()
-                    return h == d or h.endswith("." + d)
                 try:
                     raw_cookies = await pool.browser.cookies.get_all()
                     cookies = [
                         {"name": c.name, "value": c.value, "domain": c.domain,
                          "path": c.path, "expires": c.expires}
                         for c in raw_cookies
-                        if _matches(c.domain or "")
+                        if _match_host(target_host, c.domain or "")
                     ]
                 except Exception as e:
                     _step(req_id, f"cookie fetch failed: {e}")

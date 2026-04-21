@@ -166,6 +166,15 @@ async def handle_challenge(request: web.Request) -> web.Response:
 
 
 async def handle_health(request: web.Request) -> web.Response:
+    # Don't force-launch the browser from the healthcheck when delegating
+    # to FlareSolverr; that's how the container got into a restart loop.
+    if os.environ.get("FLARESOLVERR_URL"):
+        return web.json_response({
+            "status": "ok",
+            "mode": "flaresolverr",
+            "flaresolverr_url": os.environ["FLARESOLVERR_URL"],
+            **_stats,
+        })
     pool = await get_pool()
     return web.json_response({
         "status": "ok",
@@ -176,13 +185,26 @@ async def handle_health(request: web.Request) -> web.Response:
 
 
 async def on_startup(app):
+    # When delegating CF clearance to FlareSolverr we do not need the
+    # in-process browser warm on boot. /solve (Turnstile widget path) will
+    # spin it up on first use.
+    if os.environ.get("FLARESOLVERR_URL"):
+        print(
+            f"[solver] FlareSolverr delegation enabled "
+            f"({os.environ['FLARESOLVERR_URL']}); browser lazy",
+            flush=True,
+        )
+        return
     pool = await get_pool(MAX_WORKERS)
     print(f"[solver] browser ready, MAX_WORKERS={pool.max_concurrent}", flush=True)
 
 
 async def on_cleanup(app):
-    pool = await get_pool()
-    await pool.shutdown()
+    # Avoid spinning up the browser just to stop it when FS is handling traffic.
+    import solver as _s
+    if _s._pool is None:
+        return
+    await _s._pool.shutdown()
 
 
 def main():
