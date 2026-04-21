@@ -3,16 +3,21 @@ services:
     build: .
     container_name: violetics-solver
     restart: unless-stopped
+    depends_on:
+      flaresolverr:
+        condition: service_healthy
     ports:
       - "9988:9988"
     environment:
       MAX_WORKERS: "8"
       PORT: "9988"
-      # Delegate CF JS-challenge clearance to FlareSolverr. nodriver on this
-      # host is fingerprinted by CF (the Turnstile iframe never mounts), so
-      # the interactive click path cannot work. FlareSolverr uses its own
-      # stealth Chromium and reliably clears the same URLs.
-      FLARESOLVERR_URL: "http://172.17.0.1:8191"
+      # Delegate CF JS-challenge clearance to FlareSolverr. nodriver on
+      # headless Linux hosts is fingerprinted by current CF deploys (the
+      # Turnstile iframe never mounts), so the interactive-click path
+      # cannot work. FlareSolverr ships a stealth Chromium that reliably
+      # clears the same URLs. The in-process browser is kept as fallback
+      # and still powers the /solve (Turnstile token) endpoint.
+      FLARESOLVERR_URL: "http://flaresolverr:8191"
     volumes:
       - solver-profile:/tmp/ts_profile
     shm_size: "1gb"
@@ -22,6 +27,20 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: violetics-flaresolverr
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: "info"
+      TZ: "Asia/Jakarta"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8191/',timeout=2).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
 
 volumes:
   solver-profile:
