@@ -191,80 +191,96 @@ _IS_CHALLENGE_JS = """
 """
 
 
-_BOOTSTRAP_MAIN_JS = """
-(function() {
-  sessionStorage.removeItem("_tsToken");
-  sessionStorage.removeItem("_tsErr");
-  window._tsReady = function() {
-    const d = document.createElement("div");
-    d.id = "_ts_box";
-    d.style.cssText = "position:fixed;top:80px;left:80px;z-index:2147483647;width:300px;height:65px;";
-    document.body.appendChild(d);
-    try {
-      turnstile.render("#_ts_box", {
-        sitekey: "__SITEKEY__",
-        callback: (t) => { sessionStorage.setItem("_tsToken", t); },
-        "error-callback": (e) => { sessionStorage.setItem("_tsErr", String(e)); }
-      });
-    } catch (e) { sessionStorage.setItem("_tsErr", String(e)); }
-  };
-  const api = document.createElement("script");
-  api.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?onload=_tsReady&render=explicit";
-  api.async = true;
-  document.head.appendChild(api);
-})();
-"""
+# HTML body served at the intercepted siteurl. The <div class="cf-turnstile">
+# is auto-discovered and rendered by api.js without a manual render() call,
+# so we never touch the widget's main-world JS - side-steps Camoufox's
+# isolated-world sandbox. Based on the Theyka/Turnstile-Solver approach.
+_HOST_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>.</title>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+</head><body>
+<div class="cf-turnstile" data-sitekey="__SITEKEY__"__EXTRA__></div>
+</body></html>"""
 
 
-async def _turnstile_on_page(page, sitekey: str, req_id: str, timeout: int) -> str:
-    """Inject Turnstile widget and return token.
+async def _turnstile_on_page(page, sitekey: str, siteurl: str, req_id: str,
+                              timeout: int, action: Optional[str] = None,
+                              cdata: Optional[str] = None) -> str:
+    """Inject Turnstile on an intercepted siteurl and return the token.
 
-    Bootstrap runs in the page's MAIN world via a <script textContent=...>
-    tag (Camoufox sandboxes `page.evaluate` in an isolated world, so the
-    api.js `?onload=...` callback cannot see a function installed from
-    evaluate). MAIN and isolated worlds share sessionStorage, so we poll
-    sessionStorage from Python.
+    We route-intercept the exact siteurl and fulfill it with a minimal
+    HTML body carrying a cf-turnstile div with the requested sitekey.
+    api.js auto-renders the widget, so the main-world JS never needs to
+    be reached - sidesteps Camoufox's isolated-world sandbox. Referer
+    and origin still match siteurl so CF issues a valid token.
     """
     loop = asyncio.get_event_loop()
     t0 = loop.time()
 
-    _step(req_id, "waiting for page load...")
-    try:
-        await page.wait_for_load_state("load", timeout=15_000)
-    except Exception:
-        pass
-    _step(req_id, f"page loaded ({loop.time() - t0:.1f}s)")
+    extra = ""
+    if action:
+        extra += f' data-action="{action}"'
+    if cdata:
+        extra += f' data-cdata="{cdata}"'
+    body = _HOST_HTML.replace("__SITEKEY__", sitekey).replace("__EXTRA__", extra)
 
-    _step(req_id, "injecting turnstile widget")
-    await page.evaluate(
-        "(src) => { const s = document.createElement('script'); s.textContent = src; document.head.appendChild(s); }",
-        _BOOTSTRAP_MAIN_JS.replace("__SITEKEY__", sitekey),
-    )
+    target = siteurl if siteurl.endswith("/") else siteurl + "/"
+
+    async def _fulfill(route):
+        try:
+            await route.fulfill(status=200, content_type="text/html", body=body)
+        except Exception:
+            try:
+                await route.continue_()
+            except Exception:
+                pass
+
+    await page.route(target, _fulfill)
+    _step(req_id, f"route intercepted {target}")
+
+    try:
+        await page.goto(target, timeout=15_000)
+    except Exception as e:
+        _step(req_id, f"goto warn: {e}")
 
     deadline = t0 + timeout
+    clicked = False
     while loop.time() < deadline:
-        token = await page.evaluate("sessionStorage.getItem('_tsToken')")
-        if token:
+        try:
+            val = await page.locator('[name=cf-turnstile-response]').first.get_attribute("value", timeout=500)
+        except Exception:
+            val = None
+        if val:
             _step(req_id, f"token obtained ({loop.time() - t0:.1f}s)")
-            return token
-        err = await page.evaluate("sessionStorage.getItem('_tsErr')")
-        if err:
-            raise RuntimeError(f"turnstile error: {err}")
+            return val
+
+        if not clicked:
+            try:
+                await page.locator(".cf-turnstile").first.click(timeout=2_000)
+                _step(req_id, f"clicked widget ({loop.time() - t0:.1f}s)")
+                clicked = True
+            except Exception:
+                pass
+
         await asyncio.sleep(0.5)
 
     raise TimeoutError(f"turnstile timeout after {timeout}s")
 
 
 async def solve_async(sitekey: str, siteurl: str, req_id: str = "-",
-                      timeout: int = 45) -> str:
+                      timeout: int = 45, action: Optional[str] = None,
+                      cdata: Optional[str] = None) -> str:
     pool = await get_pool()
     async with pool.sem:
         async with pool.solve_lock:
-            _step(req_id, f"opening tab -> {siteurl}")
+            _step(req_id, f"opening tab for {siteurl}")
             page = None
             try:
-                page = await pool.new_page(siteurl)
-                return await _turnstile_on_page(page, sitekey, req_id, timeout)
+                await pool.ensure()
+                page = await pool.browser.new_page()
+                return await _turnstile_on_page(
+                    page, sitekey, siteurl, req_id, timeout, action, cdata
+                )
             finally:
                 pool.solve_count += 1
                 if page is not None:

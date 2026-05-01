@@ -121,6 +121,8 @@ async def handle_solve(request: web.Request) -> web.Response:
     sitekey = (payload.get("sitekey") or "").strip()
     siteurl = (payload.get("siteurl") or "").strip()
     timeout = int(payload.get("timeout", 45))
+    action = payload.get("action") or None
+    cdata = payload.get("cdata") or None
 
     _emit_start(rid, method, path, siteurl, sitekey, peer)
 
@@ -132,7 +134,8 @@ async def handle_solve(request: web.Request) -> web.Response:
 
     _stats["in_flight"] += 1
     try:
-        token = await solve_async(sitekey, siteurl, req_id=rid, timeout=timeout)
+        token = await solve_async(sitekey, siteurl, req_id=rid, timeout=timeout,
+                                   action=action, cdata=cdata)
         elapsed = time.time() - t0
         _stats["solved"] += 1
         body = {"token": token, "elapsed": round(elapsed, 2)}
