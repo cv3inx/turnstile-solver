@@ -2,43 +2,36 @@
 Cloudflare Turnstile + JS-Challenge ("Just a moment...") solver.
 
 Design notes:
-  - Single warm browser, persistent profile - fresh profiles get hard
-    challenges from Cloudflare (~45s) while a warm profile typically
-    clears in 5-10s.
-  - Tab-per-request via new_tab=True, closed after solve.
-  - Solves are internally serialised with a lock: concurrent tabs hitting
-    the same sitekey cause CF to escalate difficulty, so real parallelism
-    is not practical. HTTP callers can still fire in parallel - requests
-    queue here.
-  - No hardcoded sleeps. Event-driven waits on readyState, turnstile
-    global, token, or cf_chl_opt absence.
+  - Single warm Camoufox (stealth Firefox) browser with a persistent
+    profile. Camoufox replaces nodriver because CF fingerprints
+    patchright/nodriver on current Cloudflare deploys so the Turnstile
+    iframe never mounts. Camoufox + its built-in human-like mouse model
+    reliably clears the widget.
+  - New page per request via `browser.new_page()`, closed after solve.
+  - Solves serialised through a lock: concurrent tabs hitting the same
+    sitekey make CF escalate difficulty. HTTP callers can still fire in
+    parallel - requests queue here.
+  - No hardcoded sleeps. Event-driven waits via page.wait_for_function.
   - Two public entry points:
         solve_async(sitekey, siteurl) -> str
         solve_challenge_async(siteurl) -> dict   # cleared cookies + html
 
-  - solve_challenge_async optionally delegates to a FlareSolverr instance
-    when FLARESOLVERR_URL is set. nodriver/patchright on headless
-    Linux hosts are reliably fingerprinted by current Cloudflare deploys
-    (the Turnstile iframe never mounts, so there is nothing to click),
-    while FlareSolverr ships its own stealth Chromium build that still
-    clears these pages. Fall back to the in-process browser only when
-    FlareSolverr is unreachable or explicitly disabled.
+  - solve_challenge_async optionally delegates to a challenge proxy
+    (Byparr or FlareSolverr) when CHALLENGE_PROXY_URL / FLARESOLVERR_URL
+    is set. The in-process browser is the fallback.
 """
 
 import asyncio
 import json
 import logging
 import os
-import platform
 import random
-import subprocess
-import sys
 import time
 from typing import Optional
 from urllib.parse import urlparse
 
 import aiohttp
-import nodriver as uc
+from camoufox.async_api import AsyncCamoufox
 
 
 log = logging.getLogger("solver")
@@ -49,165 +42,80 @@ def _step(req_id: str, msg: str):
     print(f"  [{req_id}] {msg}", flush=True)
 
 
-# ---------- Chrome / Xvfb discovery ----------
-
-def _find_chrome() -> str:
-    """Locate a Chrome/Chromium binary."""
-    import glob
-    if os.environ.get("CHROME_PATH"):
-        return os.environ["CHROME_PATH"]
-
-    pw_roots = [
-        os.path.expanduser("~/.cache/ms-playwright"),
-        "/root/.cache/ms-playwright",
-        os.environ.get("PLAYWRIGHT_BROWSERS_PATH", ""),
-    ]
-    patterns = [
-        "chromium-*/chrome-linux*/chrome",
-        "chromium-*/chrome-linux*/chrome.exe",
-        "chromium_headless_shell-*/chrome-linux*/headless_shell",
-    ]
-    for root in pw_roots:
-        if not root or not os.path.isdir(root):
-            continue
-        for pat in patterns:
-            matches = sorted(glob.glob(os.path.join(root, pat)), reverse=True)
-            if matches:
-                return matches[0]
-
-    if platform.system() == "Windows":
-        candidates = [
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
-        ]
-    else:
-        candidates = [
-            "/usr/bin/google-chrome-stable",
-            "/usr/bin/google-chrome",
-            "/usr/bin/chromium-browser",
-            "/usr/bin/chromium",
-        ]
-    for p in candidates:
-        if os.path.isfile(p):
-            return p
-    raise FileNotFoundError(
-        "Chrome not found. Install via `python -m patchright install chromium` or set CHROME_PATH."
-    )
-
+# ---------- Profile + headless mode ----------
 
 def _get_profile_dir() -> str:
     if os.environ.get("TS_PROFILE_DIR"):
         return os.environ["TS_PROFILE_DIR"]
-    if platform.system() == "Windows":
-        base = os.environ.get("TEMP") or os.environ.get("TMP") or r"C:\Temp"
-        return os.path.join(base, "ts_profile")
     return "/tmp/ts_profile"
 
 
-def _clear_stale_profile_locks(profile: str) -> None:
-    """Remove Chrome singleton lock files left over from a prior process.
-
-    The symlink target is `<hostname>-<pid>`; inside a container a restart
-    changes the hostname so the lock is always stale on boot.
-    """
-    if not os.path.isdir(profile):
-        return
-    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
-        p = os.path.join(profile, name)
-        try:
-            if os.path.islink(p) or os.path.exists(p):
-                os.unlink(p)
-        except OSError:
-            pass
-
-
-def _start_xvfb_if_needed() -> Optional[subprocess.Popen]:
-    if platform.system() != "Linux" or os.environ.get("DISPLAY"):
-        return None
-    proc = subprocess.Popen(
-        ["Xvfb", ":99", "-screen", "0", "1280x900x24"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    os.environ["DISPLAY"] = ":99"
-    time.sleep(0.5)
-    return proc
-
-
-# ---------- Event-driven waits ----------
-
-async def _wait_for_eval(tab, expr: str, timeout: float, poll: float = 0.1) -> bool:
-    deadline = asyncio.get_event_loop().time() + timeout
-    while asyncio.get_event_loop().time() < deadline:
-        try:
-            val = await tab.evaluate(expr)
-            if val:
-                return True
-        except Exception:
-            pass
-        await asyncio.sleep(poll)
-    return False
-
-
-async def _wait_ready(tab, timeout: float = 15.0):
-    await _wait_for_eval(tab, 'document.readyState === "complete"', timeout)
+def _headless_mode():
+    # Camoufox accepts False, True, or 'virtual'. 'virtual' spawns its own
+    # Xvfb internally so we don't need one in the image.
+    mode = os.environ.get("CAMOUFOX_HEADLESS", "virtual").lower()
+    if mode in ("true", "1"):
+        return True
+    if mode in ("false", "0"):
+        return False
+    return "virtual"
 
 
 # ---------- Singleton browser ----------
 
 class BrowserSingleton:
     def __init__(self, max_concurrent: int):
-        self.browser: Optional[uc.Browser] = None
+        self._camoufox: Optional[AsyncCamoufox] = None
+        self.browser = None  # playwright BrowserContext when launched with user_data_dir
         self.sem = asyncio.Semaphore(max_concurrent)
         self.solve_lock = asyncio.Lock()
         self.max_concurrent = max_concurrent
         self._start_lock = asyncio.Lock()
         self.solve_count = 0
+        self.stopped = False
 
     async def ensure(self):
         async with self._start_lock:
-            if self.browser is not None and not self.browser.stopped:
+            if self.browser is not None and not self.stopped:
                 return
             profile = _get_profile_dir()
-            # Chrome writes a SingletonLock symlink naming the host+pid that
-            # owns the profile. If the previous owner was killed (container
-            # restart, OOM, hard crash) the symlink survives and the next
-            # Chrome silently exits with "profile in use" - nodriver then
-            # times out after ~2.75s with "Failed to connect to browser".
-            # Clearing stale locks on startup fixes the restart loop.
-            _clear_stale_profile_locks(profile)
-            log.info("launching chrome profile=%s", profile)
-            self.browser = await uc.start(
-                browser_executable_path=_find_chrome(),
-                headless=False,
-                no_sandbox=True,
+            os.makedirs(profile, exist_ok=True)
+            log.info("launching camoufox profile=%s", profile)
+            self._camoufox = AsyncCamoufox(
+                headless=_headless_mode(),
+                humanize=True,
+                persistent_context=True,
                 user_data_dir=profile,
+                os=["windows", "macos", "linux"],
+                locale="en-US",
             )
-            try:
-                await self.browser.get("about:blank")
-            except Exception:
-                pass
-            log.info("chrome ready")
+            # AsyncCamoufox is an async context manager. Enter it
+            # manually so the BrowserContext survives beyond a `with`
+            # block and can be reused across many HTTP requests.
+            self.browser = await self._camoufox.__aenter__()
+            self.stopped = False
+            log.info("camoufox ready")
 
-    async def new_tab(self, url: str):
+    async def new_page(self, url: str):
         await self.ensure()
-        tab = await self.browser.get(url, new_tab=True)
+        page = await self.browser.new_page()
         try:
-            await tab.activate()
-        except Exception:
-            pass
-        try:
-            await tab.bring_to_front()
-        except Exception:
-            pass
-        return tab
+            await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+        except Exception as e:
+            log.warning("initial goto failed: %s", e)
+        return page
 
     async def shutdown(self):
-        if self.browser and not self.browser.stopped:
+        if self.stopped:
+            return
+        self.stopped = True
+        if self._camoufox is not None:
             try:
-                self.browser.stop()
+                await self._camoufox.__aexit__(None, None, None)
             except Exception:
                 pass
+        self._camoufox = None
+        self.browser = None
 
 
 _pool: Optional[BrowserSingleton] = None
@@ -226,9 +134,9 @@ async def get_pool(size: Optional[int] = None) -> BrowserSingleton:
         return _pool
 
 
-# ---------- Turnstile solver ----------
+# ---------- Turnstile injection ----------
 
-_INJECT_JS = """
+_INJECT_JS_TEMPLATE = """
 (() => {
     if (document.getElementById('_ts_box')) return;
     window._tsToken = null;
@@ -262,7 +170,7 @@ _GET_TOKEN_JS = """
 """
 
 _GET_IFRAME_RECT_JS = """
-JSON.stringify((() => {
+(() => {
     for (const f of document.querySelectorAll('iframe')) {
         const src = f.src || f.getAttribute('src') || '';
         if (!src.includes('challenges.cloudflare.com')) continue;
@@ -270,30 +178,39 @@ JSON.stringify((() => {
         if (r.width > 50 && r.height > 20) return {x:r.x, y:r.y, w:r.width, h:r.height};
     }
     return null;
-})())
+})()
+"""
+
+_IS_CHALLENGE_JS = """
+(() => {
+    if (document.title.toLowerCase().includes('just a moment')) return true;
+    if (document.querySelector('div.challenge-form, #challenge-form, .ray-id')) return true;
+    if (document.querySelector('iframe[src*="challenges.cloudflare.com/cdn-cgi"]')) return true;
+    return false;
+})()
 """
 
 
-async def _turnstile_on_tab(tab, sitekey: str, req_id: str, timeout: int) -> str:
+async def _turnstile_on_page(page, sitekey: str, req_id: str, timeout: int) -> str:
     loop = asyncio.get_event_loop()
     t0 = loop.time()
 
     _step(req_id, "waiting for page load...")
-    await _wait_for_eval(
-        tab,
-        "performance.timing && performance.timing.loadEventEnd > 0",
-        timeout=15,
-    )
+    try:
+        await page.wait_for_load_state("load", timeout=15_000)
+    except Exception:
+        pass
     _step(req_id, f"page loaded ({loop.time() - t0:.1f}s)")
 
     _step(req_id, "injecting turnstile widget")
-    await tab.evaluate(_INJECT_JS.replace("__SITEKEY__", sitekey))
+    await page.evaluate(_INJECT_JS_TEMPLATE.replace("__SITEKEY__", sitekey))
 
-    if not await _wait_for_eval(
-        tab,
-        'typeof turnstile !== "undefined" && !!document.getElementById("_ts_box")',
-        timeout=10,
-    ):
+    try:
+        await page.wait_for_function(
+            'typeof turnstile !== "undefined" && !!document.getElementById("_ts_box")',
+            timeout=10_000,
+        )
+    except Exception:
         raise RuntimeError("turnstile api.js did not load")
     _step(req_id, f"turnstile ready ({loop.time() - t0:.1f}s)")
 
@@ -304,19 +221,18 @@ async def _turnstile_on_tab(tab, sitekey: str, req_id: str, timeout: int) -> str
     last_click = 0.0
 
     while loop.time() < deadline:
-        token = await tab.evaluate(_GET_TOKEN_JS)
+        token = await page.evaluate(_GET_TOKEN_JS)
         if token:
             _step(req_id, f"token obtained ({loop.time() - t0:.1f}s)")
             return token
 
         if rect is None:
-            raw = await tab.evaluate(_GET_IFRAME_RECT_JS)
-            if raw and raw != "null":
-                try:
-                    rect = json.loads(raw)
+            try:
+                rect = await page.evaluate(_GET_IFRAME_RECT_JS)
+                if rect:
                     _step(req_id, f"iframe detected at ({rect['x']:.0f},{rect['y']:.0f})")
-                except Exception:
-                    rect = None
+            except Exception:
+                rect = None
 
         now = loop.time()
         target = rect or fallback_rect
@@ -326,11 +242,11 @@ async def _turnstile_on_tab(tab, sitekey: str, req_id: str, timeout: int) -> str
             cy = target["y"] + target["h"] / 2 + random.uniform(-3, 3)
             _step(req_id, f"click #{clicks + 1} at ({cx:.0f},{cy:.0f})")
             try:
-                await tab.mouse_move(cx - 50, cy - 20)
-                await asyncio.sleep(0.06)
-                await tab.mouse_move(cx, cy)
-                await asyncio.sleep(0.04)
-                await tab.mouse_click(cx, cy)
+                await page.mouse.move(cx - 60, cy - 20)
+                await asyncio.sleep(0.05)
+                await page.mouse.move(cx, cy)
+                await asyncio.sleep(0.03)
+                await page.mouse.click(cx, cy)
             except Exception as e:
                 _step(req_id, f"click error: {e}")
             last_click = now
@@ -347,33 +263,23 @@ async def solve_async(sitekey: str, siteurl: str, req_id: str = "-",
     async with pool.sem:
         async with pool.solve_lock:
             _step(req_id, f"opening tab -> {siteurl}")
-            tab = None
+            page = None
             try:
-                tab = await pool.new_tab(siteurl)
-                return await _turnstile_on_tab(tab, sitekey, req_id, timeout)
+                page = await pool.new_page(siteurl)
+                return await _turnstile_on_page(page, sitekey, req_id, timeout)
             finally:
                 pool.solve_count += 1
-                if tab is not None:
+                if page is not None:
                     try:
-                        await tab.close()
+                        await page.close()
                     except Exception:
                         pass
 
 
 # ---------- JS Challenge ("Just a moment...") ----------
 
-_IS_CHALLENGE_JS = """
-(() => {
-    if (document.title.toLowerCase().includes('just a moment')) return true;
-    if (document.querySelector('div.challenge-form, #challenge-form, .ray-id')) return true;
-    if (document.querySelector('iframe[src*="challenges.cloudflare.com/cdn-cgi"]')) return true;
-    return false;
-})()
-"""
-
-
 _CF_WIDGET_RECT_JS = """
-JSON.stringify((() => {
+(() => {
     for (const f of document.querySelectorAll('iframe')) {
         const src = f.src || f.getAttribute('src') || '';
         if (!src.includes('challenges.cloudflare.com')) continue;
@@ -386,7 +292,7 @@ JSON.stringify((() => {
         if (r.width > 50 && r.height > 20) return {x:r.x, y:r.y, w:r.width, h:r.height};
     }
     return null;
-})())
+})()
 """
 
 
@@ -397,12 +303,7 @@ def _match_host(target_host: str, cdomain: str) -> bool:
 
 
 def _challenge_proxy() -> tuple[Optional[str], str]:
-    """Return (base_url, kind) for the configured challenge proxy.
-
-    kind is "byparr" (max_timeout=seconds, snake_case solution fields) or
-    "flaresolverr" (maxTimeout=ms, camelCase). Accepts either new
-    CHALLENGE_PROXY_URL/KIND vars or the legacy FLARESOLVERR_URL.
-    """
+    """Return (base_url, kind) for the configured challenge proxy."""
     url = os.environ.get("CHALLENGE_PROXY_URL") or os.environ.get("FLARESOLVERR_URL") or ""
     url = url.rstrip("/")
     if not url:
@@ -413,22 +314,11 @@ def _challenge_proxy() -> tuple[Optional[str], str]:
 
 
 async def _solve_via_proxy(siteurl: str, req_id: str, timeout: int) -> Optional[dict]:
-    """Delegate JS-challenge clearance to Byparr or FlareSolverr.
-
-    nodriver on headless Linux hosts is fingerprinted by current CF
-    deploys (the Turnstile iframe never mounts). Byparr ships Camoufox +
-    playwright-captcha which clears these pages; FlareSolverr works on
-    some sites but v3.4.6 times out on CF Managed Challenges. Returns
-    the same shape as the in-process path so callers are unchanged.
-    """
     url, kind = _challenge_proxy()
     if not url:
         return None
     _step(req_id, f"delegating to {kind} -> {url}")
 
-    # CF is sensitive to trailing slash on some paths (api.sawit.biz.id
-    # /docs consistently fails, /docs/ succeeds). Retry with a slash
-    # variant when the path has no extension and no query.
     candidates = [siteurl]
     try:
         u = urlparse(siteurl)
@@ -524,24 +414,22 @@ async def solve_challenge_async(siteurl: str, req_id: str = "-",
             if result is not None:
                 return result
         except Exception as e:
-            _step(req_id, f"{proxy_kind or 'proxy'} failed, falling back to nodriver: {e}")
+            _step(req_id, f"{proxy_kind or 'proxy'} failed, falling back to camoufox: {e}")
 
     pool = await get_pool()
     async with pool.sem:
         async with pool.solve_lock:
             _step(req_id, f"opening tab -> {siteurl}")
-            tab = None
+            page = None
             try:
-                tab = await pool.new_tab(siteurl)
+                page = await pool.new_page(siteurl)
                 loop = asyncio.get_event_loop()
                 t0 = loop.time()
                 _step(req_id, "waiting for navigation...")
-                await _wait_for_eval(
-                    tab,
-                    "location.href && location.href !== 'about:blank'",
-                    timeout=15,
-                )
-                await _wait_ready(tab, timeout=10)
+                try:
+                    await page.wait_for_load_state("domcontentloaded", timeout=15_000)
+                except Exception:
+                    pass
                 _step(req_id, f"page loaded ({loop.time() - t0:.1f}s)")
 
                 deadline = t0 + timeout
@@ -551,7 +439,7 @@ async def solve_challenge_async(siteurl: str, req_id: str = "-",
                 last_click = 0.0
 
                 while loop.time() < deadline:
-                    is_challenge = await tab.evaluate(_IS_CHALLENGE_JS)
+                    is_challenge = await page.evaluate(_IS_CHALLENGE_JS)
                     if not is_challenge:
                         cleared = True
                         break
@@ -561,42 +449,38 @@ async def solve_challenge_async(siteurl: str, req_id: str = "-",
 
                     now = loop.time()
                     if clicks < 3 and (clicks == 0 or now - last_click > 6):
-                        raw = await tab.evaluate(_CF_WIDGET_RECT_JS)
-                        if raw and raw != "null":
+                        rect = await page.evaluate(_CF_WIDGET_RECT_JS)
+                        if rect:
+                            cx = rect["x"] + 28 + random.uniform(-3, 3)
+                            cy = rect["y"] + rect["h"] / 2 + random.uniform(-3, 3)
+                            _step(req_id, f"interactive click #{clicks + 1} at ({cx:.0f},{cy:.0f})")
                             try:
-                                rect = json.loads(raw)
-                                cx = rect["x"] + 28 + random.uniform(-3, 3)
-                                cy = rect["y"] + rect["h"] / 2 + random.uniform(-3, 3)
-                                _step(req_id, f"interactive click #{clicks + 1} at ({cx:.0f},{cy:.0f})")
-                                try:
-                                    await tab.mouse_move(cx - 50, cy - 20)
-                                    await asyncio.sleep(0.06)
-                                    await tab.mouse_move(cx, cy)
-                                    await asyncio.sleep(0.04)
-                                    await tab.mouse_click(cx, cy)
-                                except Exception as e:
-                                    _step(req_id, f"click error: {e}")
-                                last_click = now
-                                clicks += 1
-                            except Exception:
-                                pass
+                                await page.mouse.move(cx - 60, cy - 20)
+                                await asyncio.sleep(0.05)
+                                await page.mouse.move(cx, cy)
+                                await asyncio.sleep(0.03)
+                                await page.mouse.click(cx, cy)
+                            except Exception as e:
+                                _step(req_id, f"click error: {e}")
+                            last_click = now
+                            clicks += 1
                     await asyncio.sleep(0.3)
 
                 if not cleared:
                     raise TimeoutError(f"challenge did not clear within {timeout}s")
 
-                final_url = await tab.evaluate("location.href")
-                title = await tab.evaluate("document.title")
-                user_agent = await tab.evaluate("navigator.userAgent")
-                html = await tab.get_content()
+                final_url = page.url
+                title = await page.title()
+                user_agent = await page.evaluate("navigator.userAgent")
+                html = await page.content()
                 target_host = urlparse(final_url or siteurl).hostname or ""
                 try:
-                    raw_cookies = await pool.browser.cookies.get_all()
+                    raw_cookies = await pool.browser.cookies()
                     cookies = [
-                        {"name": c.name, "value": c.value, "domain": c.domain,
-                         "path": c.path, "expires": c.expires}
+                        {"name": c["name"], "value": c["value"], "domain": c["domain"],
+                         "path": c["path"], "expires": c.get("expires", -1)}
                         for c in raw_cookies
-                        if _match_host(target_host, c.domain or "")
+                        if _match_host(target_host, c.get("domain", ""))
                     ]
                 except Exception as e:
                     _step(req_id, f"cookie fetch failed: {e}")
@@ -612,9 +496,9 @@ async def solve_challenge_async(siteurl: str, req_id: str = "-",
                 }
             finally:
                 pool.solve_count += 1
-                if tab is not None:
+                if page is not None:
                     try:
-                        await tab.close()
+                        await page.close()
                     except Exception:
                         pass
 
@@ -633,11 +517,6 @@ if __name__ == "__main__":
     if len(sys.argv) < 3:
         print("Usage: python solver.py <sitekey> <siteurl>")
         sys.exit(1)
-    xvfb = _start_xvfb_if_needed()
-    try:
-        t0 = time.time()
-        tok = solve(sys.argv[1], sys.argv[2])
-        print(f"{tok}\nelapsed: {time.time()-t0:.2f}s")
-    finally:
-        if xvfb:
-            xvfb.terminate()
+    t0 = time.time()
+    tok = solve(sys.argv[1], sys.argv[2])
+    print(f"{tok}\nelapsed: {time.time()-t0:.2f}s")

@@ -1,2 +1,2 @@
-nodriver>=0.38
+camoufox[geoip]>=0.4
 aiohttp>=3.10
