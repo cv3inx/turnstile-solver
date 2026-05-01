@@ -33,6 +33,7 @@ RUN pip install --no-cache-dir -r requirements.txt patchright \
     && python -m patchright install-deps chromium || true
 
 COPY solver.py service.py entrypoint.sh ./
+COPY web ./web
 RUN chmod +x entrypoint.sh
 
 EXPOSE 9988

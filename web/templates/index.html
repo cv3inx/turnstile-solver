@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Violetics Solver &middot; Playground</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+</head>
+<body>
+<header>
+  <span class="dot"></span>
+  <h1>Violetics Solver</h1>
+  <span class="mono" id="h_endpoint">—</span>
+  <span class="tag" id="h_mode">mode: —</span>
+</header>
+
+<section class="stats" id="stats">
+  <div class="stat"><span class="lbl">Uptime</span><span class="val" id="st_uptime">—</span></div>
+  <div class="stat"><span class="lbl">In-flight</span><span class="val" id="st_inflight">0</span></div>
+  <div class="stat"><span class="lbl">Solved</span><span class="val" id="st_solved">0</span></div>
+  <div class="stat"><span class="lbl">Challenges</span><span class="val" id="st_challenges">0</span></div>
+  <div class="stat"><span class="lbl">Errors</span><span class="val" id="st_errors">0</span></div>
+  <div class="stat"><span class="lbl">Success</span><span class="val" id="st_success">—</span></div>
+  <div class="stat"><span class="lbl">Avg</span><span class="val" id="st_avg">—</span></div>
+  <div class="stat"><span class="lbl">p95</span><span class="val" id="st_p95">—</span></div>
+</section>
+
+<main>
+  <section class="card">
+    <div class="tabs">
+      <div class="tab active" data-tab="solve">Turnstile</div>
+      <div class="tab" data-tab="challenge">CF Challenge</div>
+      <div class="tab" data-tab="raw">Raw JSON</div>
+      <div class="tab" data-tab="snippet">Code</div>
+    </div>
+
+    <div class="tab-panel active" data-panel="solve">
+      <div class="body">
+        <label>Site URL</label>
+        <input id="s_url" value="https://www.instveed.com/en">
+        <label>Site Key</label>
+        <input id="s_key" value="0x4AAAAAAC3x1HgHsaQcGwbt">
+        <div class="row">
+          <div><label>Timeout (s)</label><input id="s_to" type="number" value="45"></div>
+        </div>
+        <div class="chiprow">
+          <span class="chip" data-preset="solve" data-url="https://www.instveed.com/en" data-key="0x4AAAAAAC3x1HgHsaQcGwbt">instveed</span>
+        </div>
+        <div class="actions">
+          <button id="run_solve">Send</button>
+          <span class="status" id="s_status">ready</span>
+        </div>
+        <div class="hint">POST /solve &rarr; returns a Turnstile token.</div>
+      </div>
+    </div>
+
+    <div class="tab-panel" data-panel="challenge">
+      <div class="body">
+        <label>Site URL</label>
+        <input id="c_url" value="https://api.sawit.biz.id/docs">
+        <div class="row">
+          <div><label>Timeout (s)</label><input id="c_to" type="number" value="60"></div>
+        </div>
+        <div class="chiprow">
+          <span class="chip" data-preset="challenge" data-url="https://api.sawit.biz.id/docs">sawit /docs</span>
+          <span class="chip" data-preset="challenge" data-url="https://cobalt.meowing.de/">cobalt</span>
+          <span class="chip" data-preset="challenge" data-url="https://nopecha.com/demo/cloudflare">nopecha demo</span>
+        </div>
+        <div class="actions">
+          <button id="run_challenge">Send</button>
+          <span class="status" id="c_status">ready</span>
+        </div>
+        <div class="hint">POST /solve-challenge &rarr; clears &quot;Just a moment&hellip;&quot;, returns cookies + HTML.</div>
+      </div>
+    </div>
+
+    <div class="tab-panel" data-panel="raw">
+      <div class="body">
+        <label>Endpoint</label>
+        <select id="r_ep"><option>/solve</option><option>/solve-challenge</option></select>
+        <label>JSON body</label>
+        <textarea id="r_body">{
+  "sitekey": "0x4AAAAAAC3x1HgHsaQcGwbt",
+  "siteurl": "https://www.instveed.com/en",
+  "timeout": 45
+}</textarea>
+        <div class="actions">
+          <button id="run_raw">Send</button>
+          <span class="status" id="r_status">ready</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" data-panel="snippet">
+      <div class="body">
+        <div class="sub-tabs">
+          <div class="sub-tab active" data-lang="curl">curl</div>
+          <div class="sub-tab" data-lang="node">Node.js</div>
+          <div class="sub-tab" data-lang="python">Python</div>
+          <div class="sub-tab" data-lang="php">PHP</div>
+          <div class="sub-tab" data-lang="go">Go</div>
+        </div>
+        <div class="sub-tab-target">
+          <label>Source (pulls from the active tab above)</label>
+          <select id="snip_src">
+            <option value="solve">/solve &middot; Turnstile</option>
+            <option value="challenge">/solve-challenge &middot; CF</option>
+          </select>
+        </div>
+        <div class="snip-wrap">
+          <pre id="snip_out"><code>// select language above</code></pre>
+          <span class="copy" id="snip_copy">copy</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>
+      <span>Response</span>
+      <span class="copy" id="copy">copy</span>
+    </h2>
+    <div class="meta" id="meta"><span class="kv"><b>status</b> —</span><span class="kv"><b>time</b> —</span></div>
+    <pre id="out">// response appears here</pre>
+  </section>
+
+  <section class="card events">
+    <h2><span>Recent events</span><span class="sub" id="ev_count">0</span></h2>
+    <div id="events" class="event-list"><div class="empty">No requests yet. Send one to see it here.</div></div>
+  </section>
+</main>
+
+<footer>Violetics Solver &middot; <a href="/health">health</a> &middot; <a href="/stats">stats</a></footer>
+<script src="/static/app.js"></script>
+</body>
+</html>
