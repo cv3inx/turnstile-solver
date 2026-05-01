@@ -14,7 +14,7 @@ from typing import Optional
 
 from aiohttp import web
 
-from solver import get_pool, solve_async, solve_challenge_async
+from solver import get_pool, solve_async, solve_challenge_async, _challenge_proxy
 
 
 PORT = int(os.environ.get("PORT", 9988))
@@ -166,13 +166,14 @@ async def handle_challenge(request: web.Request) -> web.Response:
 
 
 async def handle_health(request: web.Request) -> web.Response:
-    # Don't force-launch the browser from the healthcheck when delegating
-    # to FlareSolverr; that's how the container got into a restart loop.
-    if os.environ.get("FLARESOLVERR_URL"):
+    # Don't force-launch the browser from the healthcheck when a challenge
+    # proxy is configured - that caused restart loops previously.
+    proxy_url, proxy_kind = _challenge_proxy()
+    if proxy_url:
         return web.json_response({
             "status": "ok",
-            "mode": "flaresolverr",
-            "flaresolverr_url": os.environ["FLARESOLVERR_URL"],
+            "mode": proxy_kind,
+            "proxy_url": proxy_url,
             **_stats,
         })
     pool = await get_pool()
@@ -185,15 +186,9 @@ async def handle_health(request: web.Request) -> web.Response:
 
 
 async def on_startup(app):
-    # When delegating CF clearance to FlareSolverr we do not need the
-    # in-process browser warm on boot. /solve (Turnstile widget path) will
-    # spin it up on first use.
-    if os.environ.get("FLARESOLVERR_URL"):
-        print(
-            f"[solver] FlareSolverr delegation enabled "
-            f"({os.environ['FLARESOLVERR_URL']}); browser lazy",
-            flush=True,
-        )
+    proxy_url, proxy_kind = _challenge_proxy()
+    if proxy_url:
+        print(f"[solver] {proxy_kind} delegation enabled ({proxy_url}); browser lazy", flush=True)
         return
     pool = await get_pool(MAX_WORKERS)
     print(f"[solver] browser ready, MAX_WORKERS={pool.max_concurrent}", flush=True)

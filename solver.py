@@ -105,6 +105,23 @@ def _get_profile_dir() -> str:
     return "/tmp/ts_profile"
 
 
+def _clear_stale_profile_locks(profile: str) -> None:
+    """Remove Chrome singleton lock files left over from a prior process.
+
+    The symlink target is `<hostname>-<pid>`; inside a container a restart
+    changes the hostname so the lock is always stale on boot.
+    """
+    if not os.path.isdir(profile):
+        return
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        p = os.path.join(profile, name)
+        try:
+            if os.path.islink(p) or os.path.exists(p):
+                os.unlink(p)
+        except OSError:
+            pass
+
+
 def _start_xvfb_if_needed() -> Optional[subprocess.Popen]:
     if platform.system() != "Linux" or os.environ.get("DISPLAY"):
         return None
@@ -151,12 +168,20 @@ class BrowserSingleton:
         async with self._start_lock:
             if self.browser is not None and not self.browser.stopped:
                 return
-            log.info("launching chrome profile=%s", _get_profile_dir())
+            profile = _get_profile_dir()
+            # Chrome writes a SingletonLock symlink naming the host+pid that
+            # owns the profile. If the previous owner was killed (container
+            # restart, OOM, hard crash) the symlink survives and the next
+            # Chrome silently exits with "profile in use" - nodriver then
+            # times out after ~2.75s with "Failed to connect to browser".
+            # Clearing stale locks on startup fixes the restart loop.
+            _clear_stale_profile_locks(profile)
+            log.info("launching chrome profile=%s", profile)
             self.browser = await uc.start(
                 browser_executable_path=_find_chrome(),
                 headless=False,
                 no_sandbox=True,
-                user_data_dir=_get_profile_dir(),
+                user_data_dir=profile,
             )
             try:
                 await self.browser.get("about:blank")
@@ -371,23 +396,39 @@ def _match_host(target_host: str, cdomain: str) -> bool:
     return bool(h) and (h == d or h.endswith("." + d))
 
 
-async def _solve_via_flaresolverr(siteurl: str, req_id: str, timeout: int) -> Optional[dict]:
-    """Delegate JS-challenge clearance to a running FlareSolverr instance.
+def _challenge_proxy() -> tuple[Optional[str], str]:
+    """Return (base_url, kind) for the configured challenge proxy.
 
-    FlareSolverr ships a stealth Chromium that reliably renders the CF
-    interactive widget in environments where nodriver is fingerprinted
-    (docker + Xvfb on VPS ranges CF has flagged). Returns the same shape
-    as the in-process path so callers are unchanged.
+    kind is "byparr" (max_timeout=seconds, snake_case solution fields) or
+    "flaresolverr" (maxTimeout=ms, camelCase). Accepts either new
+    CHALLENGE_PROXY_URL/KIND vars or the legacy FLARESOLVERR_URL.
     """
-    url = os.environ.get("FLARESOLVERR_URL", "").rstrip("/")
+    url = os.environ.get("CHALLENGE_PROXY_URL") or os.environ.get("FLARESOLVERR_URL") or ""
+    url = url.rstrip("/")
+    if not url:
+        return None, ""
+    kind = (os.environ.get("CHALLENGE_PROXY_KIND")
+            or ("flaresolverr" if os.environ.get("FLARESOLVERR_URL") else "byparr")).lower()
+    return url, kind
+
+
+async def _solve_via_proxy(siteurl: str, req_id: str, timeout: int) -> Optional[dict]:
+    """Delegate JS-challenge clearance to Byparr or FlareSolverr.
+
+    nodriver on headless Linux hosts is fingerprinted by current CF
+    deploys (the Turnstile iframe never mounts). Byparr ships Camoufox +
+    playwright-captcha which clears these pages; FlareSolverr works on
+    some sites but v3.4.6 times out on CF Managed Challenges. Returns
+    the same shape as the in-process path so callers are unchanged.
+    """
+    url, kind = _challenge_proxy()
     if not url:
         return None
-    _step(req_id, f"delegating to FlareSolverr -> {url}")
+    _step(req_id, f"delegating to {kind} -> {url}")
 
-    # CF's challenge platform is sensitive to the exact URL — on this
-    # deployment api.sawit.biz.id/docs consistently times out inside FS
-    # while /docs/ and / succeed. When we see a non-slash-terminated path
-    # that has no query, try a trailing-slash variant as a second attempt.
+    # CF is sensitive to trailing slash on some paths (api.sawit.biz.id
+    # /docs consistently fails, /docs/ succeeds). Retry with a slash
+    # variant when the path has no extension and no query.
     candidates = [siteurl]
     try:
         u = urlparse(siteurl)
@@ -398,6 +439,11 @@ async def _solve_via_flaresolverr(siteurl: str, req_id: str, timeout: int) -> Op
     except Exception:
         pass
 
+    if kind == "byparr":
+        payload_base = {"cmd": "request.get", "max_timeout": max(5, timeout)}
+    else:
+        payload_base = {"cmd": "request.get", "maxTimeout": max(5000, timeout * 1000)}
+
     loop = asyncio.get_event_loop()
     t0 = loop.time()
     data = None
@@ -405,11 +451,7 @@ async def _solve_via_flaresolverr(siteurl: str, req_id: str, timeout: int) -> Op
     for i, try_url in enumerate(candidates):
         if i:
             _step(req_id, f"retrying with trailing slash -> {try_url}")
-        payload = {
-            "cmd": "request.get",
-            "url": try_url,
-            "maxTimeout": max(5000, timeout * 1000),
-        }
+        payload = {**payload_base, "url": try_url}
         try:
             conn_timeout = aiohttp.ClientTimeout(total=timeout + 15)
             async with aiohttp.ClientSession(timeout=conn_timeout) as s:
@@ -419,15 +461,17 @@ async def _solve_via_flaresolverr(siteurl: str, req_id: str, timeout: int) -> Op
                         data = json.loads(body_text)
                         if (data.get("status") or "").lower() == "ok":
                             break
-                        last_err = f"flaresolverr: {data.get('message') or data}"
+                        last_err = f"{kind}: {data.get('message') or data}"
                         data = None
                         continue
-                    last_err = f"flaresolverr HTTP {resp.status}: {body_text[:300]}"
+                    last_err = f"{kind} HTTP {resp.status}: {body_text[:200]}"
         except asyncio.TimeoutError:
-            last_err = f"flaresolverr did not respond within {timeout + 15}s"
+            last_err = f"{kind} did not respond within {timeout + 15}s"
+        except aiohttp.ClientError as e:
+            last_err = f"{kind} connection error: {e}"
 
     if data is None:
-        raise RuntimeError(last_err or "flaresolverr: unknown failure")
+        raise RuntimeError(last_err or f"{kind}: unknown failure")
 
     sol = data.get("solution") or {}
     final_url = sol.get("url") or siteurl
@@ -442,7 +486,7 @@ async def _solve_via_flaresolverr(siteurl: str, req_id: str, timeout: int) -> Op
             "value": c.get("value"),
             "domain": c.get("domain"),
             "path": c.get("path", "/"),
-            "expires": c.get("expiry", -1),
+            "expires": c.get("expiry") if c.get("expiry") is not None else c.get("expires", -1),
         })
 
     html = sol.get("response") or ""
@@ -455,26 +499,32 @@ async def _solve_via_flaresolverr(siteurl: str, req_id: str, timeout: int) -> Op
         if b != -1 and c_ != -1:
             title = html[b + 1:c_].strip()
 
-    _step(req_id, f"flaresolverr cleared ({loop.time() - t0:.1f}s, cookies={len(cookies)})")
+    user_agent = sol.get("userAgent") or sol.get("user_agent") or ""
+    _step(req_id, f"{kind} cleared ({loop.time() - t0:.1f}s, cookies={len(cookies)})")
     return {
         "url": final_url,
         "title": title,
-        "user_agent": sol.get("userAgent") or "",
+        "user_agent": user_agent,
         "cookies": cookies,
         "html": html,
     }
 
 
+# Back-compat alias
+_solve_via_flaresolverr = _solve_via_proxy
+
+
 async def solve_challenge_async(siteurl: str, req_id: str = "-",
                                  timeout: int = 45) -> dict:
     """Open page, wait for CF challenge to clear, return cookies + final html."""
-    if os.environ.get("FLARESOLVERR_URL"):
+    proxy_url, proxy_kind = _challenge_proxy()
+    if proxy_url:
         try:
-            result = await _solve_via_flaresolverr(siteurl, req_id, timeout)
+            result = await _solve_via_proxy(siteurl, req_id, timeout)
             if result is not None:
                 return result
         except Exception as e:
-            _step(req_id, f"flaresolverr failed, falling back to nodriver: {e}")
+            _step(req_id, f"{proxy_kind or 'proxy'} failed, falling back to nodriver: {e}")
 
     pool = await get_pool()
     async with pool.sem:

@@ -4,20 +4,20 @@ services:
     container_name: violetics-solver
     restart: unless-stopped
     depends_on:
-      flaresolverr:
+      byparr:
         condition: service_healthy
     ports:
       - "9988:9988"
     environment:
       MAX_WORKERS: "8"
       PORT: "9988"
-      # Delegate CF JS-challenge clearance to FlareSolverr. nodriver on
-      # headless Linux hosts is fingerprinted by current CF deploys (the
-      # Turnstile iframe never mounts), so the interactive-click path
-      # cannot work. FlareSolverr ships a stealth Chromium that reliably
-      # clears the same URLs. The in-process browser is kept as fallback
-      # and still powers the /solve (Turnstile token) endpoint.
-      FLARESOLVERR_URL: "http://flaresolverr:8191"
+      # Byparr (Camoufox + playwright-captcha) replaces FlareSolverr.
+      # FS v3.4.6 times out on current CF interactive challenges; Byparr
+      # uses a stealthier fingerprint and actively tracks CF changes.
+      # Protocol is FlareSolverr-compatible except `max_timeout` is in
+      # seconds (not ms) — solver.py handles this.
+      CHALLENGE_PROXY_URL: "http://byparr:8191"
+      CHALLENGE_PROXY_KIND: "byparr"
     volumes:
       - solver-profile:/tmp/ts_profile
     shm_size: "1gb"
@@ -28,19 +28,20 @@ services:
       retries: 3
       start_period: 30s
 
-  flaresolverr:
-    image: ghcr.io/flaresolverr/flaresolverr:latest
-    container_name: violetics-flaresolverr
+  byparr:
+    image: ghcr.io/thephaseless/byparr:latest
+    container_name: violetics-byparr
     restart: unless-stopped
     environment:
-      LOG_LEVEL: "info"
+      LOG_LEVEL: "WARNING"
       TZ: "Asia/Jakarta"
+    shm_size: "1gb"
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8191/',timeout=2).status==200 else 1)"]
+      test: ["CMD-SHELL", "python3 -c 'import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(\"http://127.0.0.1:8191/docs\",timeout=3).status==200 else 1)'"]
       interval: 30s
-      timeout: 5s
+      timeout: 10s
       retries: 5
-      start_period: 60s
+      start_period: 90s
 
 volumes:
   solver-profile:
