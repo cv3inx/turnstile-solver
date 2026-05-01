@@ -8,130 +8,142 @@
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 </head>
 <body>
-<header>
-  <span class="dot"></span>
-  <h1>Violetics Solver</h1>
-  <span class="mono" id="h_endpoint">—</span>
-  <span class="tag" id="h_mode">mode: —</span>
+<header class="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#b28dff"/><stop offset="1" stop-color="#ff8ad4"/></linearGradient></defs><rect width="32" height="32" rx="7" fill="#140e1e"/><path d="M7 10 L16 24 L25 10 L21.5 10 L16 19 L10.5 10 Z" fill="url(#lg)"/></svg>
+    <div>
+      <div class="name">Violetics Solver</div>
+      <div class="sub mono" id="h_endpoint">—</div>
+    </div>
+  </div>
+  <div class="badges">
+    <span class="pill" id="h_mode">mode: —</span>
+    <a class="pill" href="/health">health</a>
+    <a class="pill" href="/stats">stats.json</a>
+  </div>
 </header>
 
-<section class="stats" id="stats">
-  <div class="stat"><span class="lbl">Uptime</span><span class="val" id="st_uptime">—</span></div>
-  <div class="stat"><span class="lbl">In-flight</span><span class="val" id="st_inflight">0</span></div>
-  <div class="stat"><span class="lbl">Solved</span><span class="val" id="st_solved">0</span></div>
-  <div class="stat"><span class="lbl">Challenges</span><span class="val" id="st_challenges">0</span></div>
-  <div class="stat"><span class="lbl">Errors</span><span class="val" id="st_errors">0</span></div>
-  <div class="stat"><span class="lbl">Success</span><span class="val" id="st_success">—</span></div>
-  <div class="stat"><span class="lbl">Avg</span><span class="val" id="st_avg">—</span></div>
-  <div class="stat"><span class="lbl">p95</span><span class="val" id="st_p95">—</span></div>
+<section class="metrics">
+  <div class="metric"><span class="lbl">Uptime</span><span class="val" id="st_uptime">—</span></div>
+  <div class="metric"><span class="lbl">In-flight</span><span class="val" id="st_inflight">0</span></div>
+  <div class="metric"><span class="lbl">Solved</span><span class="val" id="st_solved">0</span></div>
+  <div class="metric"><span class="lbl">Challenges</span><span class="val" id="st_challenges">0</span></div>
+  <div class="metric"><span class="lbl">Errors</span><span class="val" id="st_errors">0</span></div>
+  <div class="metric"><span class="lbl">Success</span><span class="val" id="st_success">—</span></div>
+  <div class="metric"><span class="lbl">Avg latency</span><span class="val" id="st_avg">—</span></div>
+  <div class="metric"><span class="lbl">p95 latency</span><span class="val" id="st_p95">—</span></div>
 </section>
 
-<main>
-  <section class="card">
-    <div class="tabs">
-      <div class="tab active" data-tab="solve">Turnstile</div>
-      <div class="tab" data-tab="challenge">CF Challenge</div>
-      <div class="tab" data-tab="raw">Raw JSON</div>
-      <div class="tab" data-tab="snippet">Code</div>
-    </div>
+<main class="grid">
+  <section class="card request-card">
+    <header class="card-head">
+      <h2>Request</h2>
+      <nav class="tabs" role="tablist">
+        <button class="tab active" data-tab="solve" role="tab">Turnstile</button>
+        <button class="tab" data-tab="challenge" role="tab">CF Challenge</button>
+        <button class="tab" data-tab="raw" role="tab">Raw JSON</button>
+      </nav>
+    </header>
 
-    <div class="tab-panel active" data-panel="solve">
-      <div class="body">
-        <label>Site URL</label>
-        <input id="s_url" value="https://www.instveed.com/en">
-        <label>Site Key</label>
-        <input id="s_key" value="0x4AAAAAAC3x1HgHsaQcGwbt">
-        <div class="row">
-          <div><label>Timeout (s)</label><input id="s_to" type="number" value="45"></div>
+    <div class="card-body">
+      <section class="tab-panel active" data-panel="solve">
+        <div class="field">
+          <label for="s_url">Site URL</label>
+          <input id="s_url" value="https://example.com/" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="s_key">Site Key</label>
+          <input id="s_key" value="1x00000000000000000000AA" spellcheck="false">
+        </div>
+        <div class="field-row">
+          <div class="field"><label for="s_to">Timeout (s)</label><input id="s_to" type="number" min="5" max="180" value="45"></div>
+          <div class="field"><label for="s_action">Action (opt)</label><input id="s_action" placeholder="—" spellcheck="false"></div>
         </div>
         <div class="chiprow">
-          <span class="chip" data-preset="solve" data-url="https://www.instveed.com/en" data-key="0x4AAAAAAC3x1HgHsaQcGwbt">instveed</span>
+          <span class="chip" data-preset="solve" data-url="https://example.com/" data-key="1x00000000000000000000AA">test sitekey (always pass)</span>
+          <span class="chip" data-preset="solve" data-url="https://example.com/" data-key="2x00000000000000000000AB">test sitekey (always block)</span>
+          <span class="chip" data-preset="solve" data-url="https://www.instveed.com/en/" data-key="0x4AAAAAAC3x1HiBz5IFyj7s">instveed</span>
         </div>
-        <div class="actions">
-          <button id="run_solve">Send</button>
-          <span class="status" id="s_status">ready</span>
-        </div>
-        <div class="hint">POST /solve &rarr; returns a Turnstile token.</div>
-      </div>
-    </div>
+      </section>
 
-    <div class="tab-panel" data-panel="challenge">
-      <div class="body">
-        <label>Site URL</label>
-        <input id="c_url" value="https://api.sawit.biz.id/docs">
-        <div class="row">
-          <div><label>Timeout (s)</label><input id="c_to" type="number" value="60"></div>
+      <section class="tab-panel" data-panel="challenge">
+        <div class="field">
+          <label for="c_url">Site URL</label>
+          <input id="c_url" value="https://api.sawit.biz.id/docs" spellcheck="false">
+        </div>
+        <div class="field-row">
+          <div class="field"><label for="c_to">Timeout (s)</label><input id="c_to" type="number" min="5" max="180" value="60"></div>
         </div>
         <div class="chiprow">
           <span class="chip" data-preset="challenge" data-url="https://api.sawit.biz.id/docs">sawit /docs</span>
           <span class="chip" data-preset="challenge" data-url="https://cobalt.meowing.de/">cobalt</span>
           <span class="chip" data-preset="challenge" data-url="https://nopecha.com/demo/cloudflare">nopecha demo</span>
         </div>
-        <div class="actions">
-          <button id="run_challenge">Send</button>
-          <span class="status" id="c_status">ready</span>
-        </div>
-        <div class="hint">POST /solve-challenge &rarr; clears &quot;Just a moment&hellip;&quot;, returns cookies + HTML.</div>
-      </div>
-    </div>
+      </section>
 
-    <div class="tab-panel" data-panel="raw">
-      <div class="body">
-        <label>Endpoint</label>
-        <select id="r_ep"><option>/solve</option><option>/solve-challenge</option></select>
-        <label>JSON body</label>
-        <textarea id="r_body">{
-  "sitekey": "0x4AAAAAAC3x1HgHsaQcGwbt",
-  "siteurl": "https://www.instveed.com/en",
+      <section class="tab-panel" data-panel="raw">
+        <div class="field">
+          <label for="r_ep">Endpoint</label>
+          <select id="r_ep"><option>/solve</option><option>/solve-challenge</option></select>
+        </div>
+        <div class="field">
+          <label for="r_body">JSON body</label>
+          <textarea id="r_body" spellcheck="false">{
+  "sitekey": "1x00000000000000000000AA",
+  "siteurl": "https://example.com/",
   "timeout": 45
 }</textarea>
-        <div class="actions">
-          <button id="run_raw">Send</button>
-          <span class="status" id="r_status">ready</span>
         </div>
-      </div>
-    </div>
+      </section>
 
-    <div class="tab-panel" data-panel="snippet">
-      <div class="body">
-        <div class="sub-tabs">
-          <div class="sub-tab active" data-lang="curl">curl</div>
-          <div class="sub-tab" data-lang="node">Node.js</div>
-          <div class="sub-tab" data-lang="python">Python</div>
-          <div class="sub-tab" data-lang="php">PHP</div>
-          <div class="sub-tab" data-lang="go">Go</div>
-        </div>
-        <div class="sub-tab-target">
-          <label>Source (pulls from the active tab above)</label>
-          <select id="snip_src">
-            <option value="solve">/solve &middot; Turnstile</option>
-            <option value="challenge">/solve-challenge &middot; CF</option>
-          </select>
-        </div>
-        <div class="snip-wrap">
-          <pre id="snip_out"><code>// select language above</code></pre>
-          <span class="copy" id="snip_copy">copy</span>
-        </div>
+      <div class="actions">
+        <button id="run_btn" class="primary">Send request</button>
+        <span class="status" id="run_status">ready</span>
+        <span class="hint mono" id="run_hint"></span>
       </div>
     </div>
   </section>
 
-  <section class="card">
-    <h2>
-      <span>Response</span>
-      <span class="copy" id="copy">copy</span>
-    </h2>
-    <div class="meta" id="meta"><span class="kv"><b>status</b> —</span><span class="kv"><b>time</b> —</span></div>
-    <pre id="out">// response appears here</pre>
+  <section class="card response-card">
+    <header class="card-head">
+      <h2>Response</h2>
+      <div class="meta" id="meta">
+        <span class="kv"><b>status</b><em>—</em></span>
+        <span class="kv"><b>time</b><em>—</em></span>
+        <span class="kv"><b>server</b><em>—</em></span>
+        <button class="link-btn" id="copy">copy</button>
+      </div>
+    </header>
+    <pre class="out" id="out">// response appears here</pre>
   </section>
 
-  <section class="card events">
-    <h2><span>Recent events</span><span class="sub" id="ev_count">0</span></h2>
-    <div id="events" class="event-list"><div class="empty">No requests yet. Send one to see it here.</div></div>
+  <section class="card snippet-card">
+    <header class="card-head">
+      <h2>Code snippet</h2>
+      <nav class="tabs mono" role="tablist">
+        <button class="tab active" data-lang="curl" role="tab">curl</button>
+        <button class="tab" data-lang="node" role="tab">Node</button>
+        <button class="tab" data-lang="python" role="tab">Python</button>
+        <button class="tab" data-lang="php" role="tab">PHP</button>
+        <button class="tab" data-lang="go" role="tab">Go</button>
+      </nav>
+    </header>
+    <pre class="out" id="snip_out"><code>// pick a tab</code></pre>
+    <button class="copy-float" id="snip_copy" title="copy">copy</button>
+  </section>
+
+  <section class="card events-card">
+    <header class="card-head">
+      <h2>Recent events</h2>
+      <span class="sub" id="ev_count">no events</span>
+    </header>
+    <div class="event-list" id="events">
+      <div class="empty">No requests yet. Send one to see it here.</div>
+    </div>
   </section>
 </main>
 
-<footer>Violetics Solver &middot; <a href="/health">health</a> &middot; <a href="/stats">stats</a></footer>
+<footer>Violetics Solver &middot; Turnstile + CF JS-Challenge</footer>
 <script src="/static/app.js"></script>
 </body>
 </html>

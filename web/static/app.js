@@ -1,25 +1,23 @@
 const $ = (id) => document.getElementById(id);
-
-// Auto-detect the solver's public URL from the address bar - snippets and
-// fetch calls use this so sharing the playground link just works.
 const BASE = `${location.protocol}//${location.host}`;
 $("h_endpoint").textContent = BASE;
 
-// ── Tabs ──────────────────────────────────────────────
-document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => {
-  document.querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
-  document.querySelectorAll(".tab-panel").forEach((x) => x.classList.remove("active"));
-  t.classList.add("active");
-  document.querySelector(`.tab-panel[data-panel="${t.dataset.tab}"]`).classList.add("active");
-  if (t.dataset.tab === "snippet") renderSnippet();
-}));
-document.querySelectorAll(".sub-tab").forEach((t) => t.addEventListener("click", () => {
-  document.querySelectorAll(".sub-tab").forEach((x) => x.classList.remove("active"));
-  t.classList.add("active");
-  renderSnippet();
-}));
+// ── Tabs (Request + Snippet) ───────────────────────
+document.querySelectorAll(".tabs").forEach((group) => {
+  group.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => {
+    group.querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
+    t.classList.add("active");
+    if (t.dataset.tab) {
+      // Request tab
+      document.querySelectorAll(".tab-panel").forEach((x) => x.classList.remove("active"));
+      document.querySelector(`.tab-panel[data-panel="${t.dataset.tab}"]`)?.classList.add("active");
+      updateHint();
+    }
+    if (t.dataset.lang) renderSnippet();
+  }));
+});
 
-// ── Presets ───────────────────────────────────────────
+// ── Presets ────────────────────────────────────────
 document.querySelectorAll(".chip").forEach((c) => c.addEventListener("click", () => {
   if (c.dataset.preset === "solve") {
     $("s_url").value = c.dataset.url;
@@ -28,116 +26,132 @@ document.querySelectorAll(".chip").forEach((c) => c.addEventListener("click", ()
     $("c_url").value = c.dataset.url;
   }
   renderSnippet();
+  updateHint();
 }));
 
-// ── Send ──────────────────────────────────────────────
-function setStatus(el, state, text) {
+// ── Active tab helpers ─────────────────────────────
+function activeRequestTab() {
+  return document.querySelector(".request-card .tab.active")?.dataset.tab || "solve";
+}
+function activeLang() {
+  return document.querySelector(".snippet-card .tab.active")?.dataset.lang || "curl";
+}
+
+function getPayload() {
+  const kind = activeRequestTab();
+  if (kind === "solve") {
+    const body = {
+      sitekey: $("s_key").value.trim(),
+      siteurl: $("s_url").value.trim(),
+      timeout: parseInt($("s_to").value) || 45,
+    };
+    const act = $("s_action").value.trim();
+    if (act) body.action = act;
+    return { endpoint: "/solve", body };
+  }
+  if (kind === "challenge") {
+    return {
+      endpoint: "/solve-challenge",
+      body: {
+        siteurl: $("c_url").value.trim(),
+        timeout: parseInt($("c_to").value) || 60,
+      },
+    };
+  }
+  // raw
+  let body;
+  try { body = JSON.parse($("r_body").value); } catch { body = {}; }
+  return { endpoint: $("r_ep").value, body };
+}
+
+function updateHint() {
+  const { endpoint } = getPayload();
+  $("run_hint").textContent = `POST ${endpoint}`;
+}
+
+// ── Status + response rendering ────────────────────
+function setStatus(state, text) {
+  const el = $("run_status");
   el.className = "status " + state;
   el.innerHTML = state === "run" ? `<span class="spin"></span> ${text}` : text;
 }
 
-function show(body, t0, res) {
-  const ms = Math.round(performance.now() - t0);
-  const statusChip = `<span class="kv"><b>status</b> ${res.status}</span>`;
-  const timeChip = `<span class="kv"><b>time</b> ${(ms / 1000).toFixed(2)}s</span>`;
-  const extra = body && body.elapsed != null ? `<span class="kv"><b>server</b> ${body.elapsed}s</span>` : "";
-  $("meta").innerHTML = statusChip + timeChip + extra;
-  $("out").textContent = typeof body === "string" ? body : JSON.stringify(body, null, 2);
+function setMeta(status, ms, serverMs) {
+  const kv = (b, e) => `<span class="kv"><b>${b}</b><em>${e}</em></span>`;
+  $("meta").innerHTML =
+    kv("status", status) +
+    kv("time", ms != null ? `${(ms / 1000).toFixed(2)}s` : "—") +
+    kv("server", serverMs != null ? `${serverMs}s` : "—") +
+    `<button class="link-btn" id="copy" onclick="copyResp()">copy</button>`;
 }
 
-async function send(ep, payload, statusEl) {
-  setStatus(statusEl, "run", "sending...");
+window.copyResp = () => navigator.clipboard.writeText($("out").textContent).then(() => {
+  const btn = document.querySelector("#meta .link-btn");
+  if (!btn) return;
+  const prev = btn.textContent; btn.textContent = "copied";
+  setTimeout(() => { btn.textContent = prev; }, 900);
+});
+
+async function send() {
+  const { endpoint, body } = getPayload();
+  if (activeRequestTab() !== "raw") {
+    if (!body.siteurl) { setStatus("err", "siteurl required"); return; }
+    if (endpoint === "/solve" && !body.sitekey) { setStatus("err", "sitekey required"); return; }
+  }
+  setStatus("run", "sending…");
+  $("run_btn").disabled = true;
   const t0 = performance.now();
   try {
-    const r = await fetch(BASE + ep, {
+    const r = await fetch(BASE + endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(body),
     });
     const ct = r.headers.get("content-type") || "";
-    const body = ct.includes("json") ? await r.json() : await r.text();
-    show(body, t0, r);
-    setStatus(statusEl, r.ok ? "ok" : "err", r.ok ? `ok ${r.status}` : `error ${r.status}`);
+    const data = ct.includes("json") ? await r.json() : await r.text();
+    const ms = performance.now() - t0;
+    setMeta(r.status, ms, data && data.elapsed);
+    $("out").textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+    setStatus(r.ok ? "ok" : "err", r.ok ? `ok ${r.status}` : `error ${r.status}`);
     refreshStats();
   } catch (e) {
-    show({ error: String(e) }, t0, { status: "net-err" });
-    setStatus(statusEl, "err", "network error");
+    setMeta("net-err", performance.now() - t0, null);
+    $("out").textContent = String(e);
+    setStatus("err", "network error");
+  } finally {
+    $("run_btn").disabled = false;
   }
 }
+$("run_btn").onclick = send;
 
-function getPayload(kind) {
-  if (kind === "solve") {
-    return {
-      endpoint: "/solve",
-      body: {
-        sitekey: $("s_key").value.trim(),
-        siteurl: $("s_url").value.trim(),
-        timeout: parseInt($("s_to").value) || 45,
-      },
-    };
-  }
-  return {
-    endpoint: "/solve-challenge",
-    body: {
-      siteurl: $("c_url").value.trim(),
-      timeout: parseInt($("c_to").value) || 60,
-    },
-  };
-}
-
-$("run_solve").onclick = () => {
-  const p = getPayload("solve");
-  send(p.endpoint, p.body, $("s_status"));
-};
-$("run_challenge").onclick = () => {
-  const p = getPayload("challenge");
-  send(p.endpoint, p.body, $("c_status"));
-};
-$("run_raw").onclick = () => {
-  let payload;
-  try { payload = JSON.parse($("r_body").value); }
-  catch { setStatus($("r_status"), "err", "invalid JSON"); return; }
-  send($("r_ep").value, payload, $("r_status"));
-};
-
-// ── Copy buttons ──────────────────────────────────────
-function setupCopy(btnId, targetId) {
-  $(btnId).onclick = () => navigator.clipboard.writeText($(targetId).textContent).then(() => {
-    const el = $(btnId);
-    const prev = el.textContent;
-    el.textContent = "copied";
-    setTimeout(() => { el.textContent = prev; }, 1000);
-  });
-}
-setupCopy("copy", "out");
-setupCopy("snip_copy", "snip_out");
-
-// ── Snippets ──────────────────────────────────────────
+// ── Snippets ───────────────────────────────────────
 function renderSnippet() {
-  const lang = document.querySelector(".sub-tab.active")?.dataset.lang || "curl";
-  const kind = $("snip_src").value;
-  const { endpoint, body } = getPayload(kind);
+  const lang = activeLang();
+  const { endpoint, body } = getPayload();
   const url = BASE + endpoint;
   const json = JSON.stringify(body, null, 2);
-  const ind = JSON.stringify(body);
+  const compact = JSON.stringify(body);
   let code = "";
-
   if (lang === "curl") {
-    code = `curl -X POST ${url} \\\n  -H 'Content-Type: application/json' \\\n  -d '${ind}'`;
+    code = `curl -X POST ${url} \\\n  -H 'Content-Type: application/json' \\\n  -d '${compact}'`;
   } else if (lang === "node") {
     code = `const res = await fetch("${url}", {
   method: "POST",
   headers: { "Content-Type": "application/json" },
-  body: JSON.stringify(${json})
+  body: JSON.stringify(${json}),
 });
 const data = await res.json();
 console.log(data);`;
   } else if (lang === "python") {
+    const py = json
+      .replace(/: true/g, ": True")
+      .replace(/: false/g, ": False")
+      .replace(/: null/g, ": None");
     code = `import requests
 
 res = requests.post(
     "${url}",
-    json=${json.replace(/"/g, '"').replace(/: true/g, ": True").replace(/: false/g, ": False").replace(/: null/g, ": None")},
+    json=${py},
     timeout=${(body.timeout || 45) + 15},
 )
 res.raise_for_status()
@@ -152,9 +166,8 @@ curl_setopt_array($ch, [
     CURLOPT_RETURNTRANSFER => true,
     CURLOPT_TIMEOUT => ${(body.timeout || 45) + 15},
 ]);
-$res = curl_exec($ch);
-curl_close($ch);
-echo $res;`;
+echo curl_exec($ch);
+curl_close($ch);`;
   } else if (lang === "go") {
     code = `package main
 
@@ -175,56 +188,48 @@ func main() {
 \tfmt.Println(string(out))
 }`;
   }
-
   $("snip_out").textContent = code;
 }
-
 function phpArray(obj) {
-  const parts = Object.entries(obj).map(([k, v]) => {
-    const val = typeof v === "string" ? `"${v}"` : v;
-    return `"${k}" => ${val}`;
-  });
-  return "[" + parts.join(", ") + "]";
+  return "[" + Object.entries(obj).map(([k, v]) =>
+    `"${k}" => ${typeof v === "string" ? `"${v}"` : v}`).join(", ") + "]";
 }
-
 function goMap(obj) {
-  const parts = Object.entries(obj).map(([k, v]) => {
-    const val = typeof v === "string" ? `"${v}"` : v;
-    return `\t\t"${k}": ${val}`;
-  });
-  return "{\n" + parts.join(",\n") + ",\n\t}";
+  return "{\n" + Object.entries(obj).map(([k, v]) =>
+    `\t\t"${k}": ${typeof v === "string" ? `"${v}"` : v}`).join(",\n") + ",\n\t}";
 }
 
-// Re-render snippet on any input change so users can copy live values
-["s_url", "s_key", "s_to", "c_url", "c_to", "snip_src"].forEach((id) => {
-  $(id).addEventListener("input", renderSnippet);
-  $(id).addEventListener("change", renderSnippet);
+$("snip_copy").onclick = () => navigator.clipboard.writeText($("snip_out").textContent).then(() => {
+  $("snip_copy").textContent = "copied";
+  setTimeout(() => { $("snip_copy").textContent = "copy"; }, 900);
 });
 
-// ── Stats polling ─────────────────────────────────────
+// Re-render snippet + hint when any input changes
+["s_url", "s_key", "s_to", "s_action", "c_url", "c_to", "r_ep", "r_body"].forEach((id) => {
+  $(id).addEventListener("input", () => { renderSnippet(); updateHint(); });
+  $(id).addEventListener("change", () => { renderSnippet(); updateHint(); });
+});
+
+// ── Stats polling ──────────────────────────────────
 function fmtUptime(s) {
   if (s < 60) return `${Math.round(s)}s`;
   if (s < 3600) return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
   if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
   return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
 }
-
 function fmtMs(ms) {
   if (!ms) return "—";
   if (ms < 1000) return `${Math.round(ms)}ms`;
   return `${(ms / 1000).toFixed(2)}s`;
 }
-
 function fmtTime(ts) {
-  const d = new Date(ts * 1000);
-  return d.toLocaleTimeString("en-GB", { hour12: false });
+  return new Date(ts * 1000).toLocaleTimeString("en-GB", { hour12: false });
 }
-
-function pulse(el) {
+function pulse(id) {
+  const el = $(id); if (!el) return;
   el.classList.add("pulse");
   setTimeout(() => el.classList.remove("pulse"), 600);
 }
-
 let lastTotal = -1;
 async function refreshStats() {
   try {
@@ -240,40 +245,33 @@ async function refreshStats() {
     $("st_success").textContent = s.total_requests ? `${s.success_rate}%` : "—";
     $("st_avg").textContent = fmtMs(s.latency_ms.avg);
     $("st_p95").textContent = fmtMs(s.latency_ms.p95);
-
     if (lastTotal >= 0 && s.total_requests > lastTotal) {
-      ["st_solved", "st_challenges", "st_errors", "st_success", "st_avg", "st_p95"].forEach(id => pulse($(id)));
+      ["st_solved", "st_challenges", "st_errors", "st_success", "st_avg", "st_p95"].forEach(pulse);
     }
     lastTotal = s.total_requests;
-
     renderEvents(s.events || []);
   } catch {}
 }
-
 function renderEvents(events) {
-  $("ev_count").textContent = `${events.length} event${events.length === 1 ? "" : "s"}`;
+  $("ev_count").textContent = events.length ? `${events.length} event${events.length === 1 ? "" : "s"}` : "no events";
   const el = $("events");
-  if (!events.length) {
-    el.innerHTML = '<div class="empty">No requests yet. Send one to see it here.</div>';
-    return;
-  }
-  el.innerHTML = events.map(e => {
+  if (!events.length) { el.innerHTML = '<div class="empty">No requests yet. Send one to see it here.</div>'; return; }
+  el.innerHTML = events.map((e) => {
     const ok = e.status >= 200 && e.status < 400;
-    const stClass = ok ? "ok" : "err";
-    const dur = fmtMs(e.duration * 1000);
     return `<div class="event">
       <span class="ts">${fmtTime(e.ts)}</span>
       <span class="ep">${esc(e.endpoint)}</span>
-      <span class="st ${stClass}">${e.status} · ${dur}</span>
+      <span class="st ${ok ? "ok" : "err"}">${e.status} · ${fmtMs(e.duration * 1000)}</span>
       <span class="sum" title="${esc(e.summary)}">${esc(e.summary)}</span>
     </div>`;
   }).join("");
 }
-
 function esc(s) {
-  return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-refreshStats();
+updateHint();
 renderSnippet();
+refreshStats();
 setInterval(refreshStats, 3000);
