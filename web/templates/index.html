@@ -2,21 +2,219 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Violetics Solver &middot; Playground</title>
+<title>Violetics Solver</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<link rel="stylesheet" href="/static/app.css">
-<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23111'/%3E%3Cpath d='M7 10 L16 24 L25 10 L21.5 10 L16 19 L10.5 10 Z' fill='%23b28dff'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --panel: #141414;
+    --line: #222;
+    --text: #e8e8e8;
+    --mute: #888;
+    --mute-2: #555;
+    --accent: #b28dff;
+    --ok: #7ddfa0;
+    --err: #ff6b83;
+    --warn: #e8c56b;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text) }
+  body {
+    font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    min-height: 100vh;
+  }
+  a { color: var(--mute); text-decoration: none }
+  a:hover { color: var(--text) }
+  button { font: inherit; cursor: pointer }
+  .mono { font-family: var(--mono) }
+
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; background: var(--bg); z-index: 5;
+  }
+  header .brand { display: flex; align-items: center; gap: 10px }
+  header .brand strong { font-size: 14px; font-weight: 600 }
+  header .brand span { font: 11px var(--mono); color: var(--mute) }
+  header .links { display: flex; gap: 6px; align-items: center }
+  .pill {
+    border: 1px solid var(--line); color: var(--mute);
+    padding: 4px 10px; border-radius: 4px;
+    font: 11px var(--mono);
+  }
+  .pill:hover { color: var(--text); border-color: var(--mute-2) }
+
+  .metrics {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    border-bottom: 1px solid var(--line);
+  }
+  .metric {
+    padding: 10px 16px;
+    border-right: 1px solid var(--line);
+  }
+  .metric:last-child { border-right: 0 }
+  .metric .lbl {
+    font-size: 10px; color: var(--mute);
+    text-transform: uppercase; letter-spacing: .5px;
+    margin-bottom: 4px;
+  }
+  .metric .val { font: 15px var(--mono); transition: color .3s }
+  .metric .val.pulse { color: var(--accent) }
+
+  main {
+    display: grid;
+    grid-template-columns: minmax(300px, 1fr) minmax(360px, 1.3fr);
+    gap: 20px;
+    padding: 20px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr } }
+
+  .col { display: flex; flex-direction: column; gap: 20px; min-width: 0 }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .card > header {
+    position: static;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--line);
+    background: transparent;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px;
+  }
+  .card > header h2 {
+    margin: 0; font: 600 11px/1 inherit;
+    text-transform: uppercase; letter-spacing: .8px;
+    color: var(--mute);
+  }
+  .card-body { padding: 14px }
+
+  .tabs { display: flex; gap: 2px }
+  .tab {
+    background: transparent; border: 0;
+    padding: 4px 10px; border-radius: 4px;
+    font: 11px var(--mono); color: var(--mute);
+    user-select: none;
+  }
+  .tab:hover { color: var(--text) }
+  .tab.active { color: var(--text); background: var(--bg) }
+  .tab-panel { display: none }
+  .tab-panel.active { display: block }
+
+  .field { margin-bottom: 10px; min-width: 0 }
+  .field-row { display: flex; gap: 10px }
+  .field-row > .field { flex: 1 }
+  label {
+    display: block; margin-bottom: 4px;
+    font-size: 10px; letter-spacing: .5px;
+    text-transform: uppercase; color: var(--mute);
+  }
+  input, textarea, select {
+    width: 100%;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--line); border-radius: 4px;
+    padding: 7px 10px;
+    font: 12.5px/1.4 var(--mono);
+  }
+  input:focus, textarea:focus, select:focus {
+    outline: none; border-color: var(--mute-2);
+  }
+  textarea { min-height: 120px; resize: vertical }
+  select { cursor: pointer }
+
+  .chiprow { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px }
+  .chip {
+    background: transparent; border: 1px solid var(--line);
+    border-radius: 4px; padding: 3px 9px;
+    font: 11px var(--mono); color: var(--mute);
+    cursor: pointer;
+  }
+  .chip:hover { color: var(--text); border-color: var(--mute-2) }
+
+  .actions {
+    display: flex; align-items: center; gap: 12px;
+    margin-top: 12px; padding-top: 12px;
+    border-top: 1px solid var(--line);
+  }
+  button.primary {
+    background: var(--accent); color: #15101e;
+    border: 0; padding: 7px 16px; border-radius: 4px;
+    font: 600 12px/1 inherit;
+  }
+  button.primary:hover { filter: brightness(1.1) }
+  button.primary:disabled { opacity: .5; cursor: not-allowed }
+
+  .status { font: 11px var(--mono); color: var(--mute); display: flex; gap: 6px; align-items: center }
+  .status.ok { color: var(--ok) }
+  .status.err { color: var(--err) }
+  .status.run { color: var(--warn) }
+  .spin {
+    width: 10px; height: 10px; border-radius: 50%;
+    border: 1.5px solid currentColor; border-top-color: transparent;
+    animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg) } }
+  .hint { margin-left: auto; font: 11px var(--mono); color: var(--mute-2) }
+
+  pre.out {
+    margin: 0; padding: 12px 14px;
+    font: 12px/1.55 var(--mono);
+    white-space: pre-wrap; word-break: break-all;
+    color: var(--text);
+    background: var(--bg);
+    max-height: 420px; overflow: auto;
+  }
+  .snippet-card pre.out { max-height: 300px }
+  pre.out::-webkit-scrollbar { width: 8px; height: 8px }
+  pre.out::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px }
+
+  .meta { display: flex; gap: 6px; align-items: center; flex-wrap: wrap }
+  .kv {
+    display: inline-flex; gap: 4px;
+    border: 1px solid var(--line); padding: 2px 8px; border-radius: 4px;
+    font: 11px var(--mono); color: var(--mute);
+  }
+  .kv b { font-weight: 500; color: var(--mute-2) }
+  .kv em { font-style: normal; color: var(--text) }
+
+  .event-list { display: flex; flex-direction: column; max-height: 340px; overflow: auto }
+  .event-list .empty { padding: 18px; text-align: center; color: var(--mute); font-size: 12px }
+  .event {
+    display: grid; grid-template-columns: 72px 140px 90px 1fr;
+    gap: 12px; padding: 7px 14px;
+    border-bottom: 1px solid var(--line);
+    font: 11.5px/1.4 var(--mono); align-items: center;
+  }
+  .event:last-child { border-bottom: 0 }
+  .event:hover { background: var(--bg) }
+  .event .ts { color: var(--mute-2) }
+  .event .st { color: var(--mute) }
+  .event .st.ok { color: var(--ok) }
+  .event .st.err { color: var(--err) }
+  .event .sum { color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+
+  footer { text-align: center; font: 11px var(--mono); color: var(--mute-2); padding: 16px }
+</style>
 </head>
 <body>
-<header class="topbar">
+
+<header>
   <div class="brand">
-    <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#b28dff"/><stop offset="1" stop-color="#ff8ad4"/></linearGradient></defs><rect width="32" height="32" rx="7" fill="#140e1e"/><path d="M7 10 L16 24 L25 10 L21.5 10 L16 19 L10.5 10 Z" fill="url(#lg)"/></svg>
+    <svg width="22" height="22" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#1a1a1a"/><path d="M7 10 L16 24 L25 10 L21.5 10 L16 19 L10.5 10 Z" fill="#b28dff"/></svg>
     <div>
-      <div class="name">Violetics Solver</div>
-      <div class="sub mono" id="h_endpoint">—</div>
+      <strong>Violetics Solver</strong>
+      <div><span id="h_endpoint">—</span></div>
     </div>
   </div>
-  <div class="badges">
+  <div class="links">
     <span class="pill" id="h_mode">—</span>
     <a class="pill" href="/health">health</a>
     <a class="pill" href="/stats">stats</a>
@@ -24,126 +222,384 @@
 </header>
 
 <section class="metrics">
-  <div class="metric"><span class="lbl">Uptime</span><span class="val" id="st_uptime">—</span></div>
-  <div class="metric"><span class="lbl">In-flight</span><span class="val" id="st_inflight">0</span></div>
-  <div class="metric"><span class="lbl">Solved</span><span class="val" id="st_solved">0</span></div>
-  <div class="metric"><span class="lbl">Challenges</span><span class="val" id="st_challenges">0</span></div>
-  <div class="metric"><span class="lbl">Errors</span><span class="val" id="st_errors">0</span></div>
-  <div class="metric"><span class="lbl">Success</span><span class="val" id="st_success">—</span></div>
-  <div class="metric"><span class="lbl">Avg latency</span><span class="val" id="st_avg">—</span></div>
-  <div class="metric"><span class="lbl">p95 latency</span><span class="val" id="st_p95">—</span></div>
+  <div class="metric"><div class="lbl">Uptime</div><div class="val" id="st_uptime">—</div></div>
+  <div class="metric"><div class="lbl">In-flight</div><div class="val" id="st_inflight">0</div></div>
+  <div class="metric"><div class="lbl">Solved</div><div class="val" id="st_solved">0</div></div>
+  <div class="metric"><div class="lbl">Challenges</div><div class="val" id="st_challenges">0</div></div>
+  <div class="metric"><div class="lbl">Errors</div><div class="val" id="st_errors">0</div></div>
+  <div class="metric"><div class="lbl">Success</div><div class="val" id="st_success">—</div></div>
+  <div class="metric"><div class="lbl">Avg</div><div class="val" id="st_avg">—</div></div>
+  <div class="metric"><div class="lbl">p95</div><div class="val" id="st_p95">—</div></div>
 </section>
 
-<main class="grid">
-  <section class="card request-card">
-    <header class="card-head">
-      <h2>Request</h2>
-      <nav class="tabs" role="tablist">
-        <button class="tab active" data-tab="solve" role="tab">Turnstile</button>
-        <button class="tab" data-tab="challenge" role="tab">CF Challenge</button>
-        <button class="tab" data-tab="raw" role="tab">Raw JSON</button>
-      </nav>
-    </header>
+<main>
+  <div class="col">
+    <section class="card">
+      <header>
+        <h2>Request</h2>
+        <div class="tabs" data-group="request">
+          <button class="tab active" data-tab="solve">Turnstile</button>
+          <button class="tab" data-tab="challenge">CF Challenge</button>
+          <button class="tab" data-tab="raw">Raw JSON</button>
+        </div>
+      </header>
+      <div class="card-body">
+        <section class="tab-panel active" data-panel="solve">
+          <div class="field">
+            <label for="s_url">Site URL</label>
+            <input id="s_url" value="https://example.com/" spellcheck="false">
+          </div>
+          <div class="field">
+            <label for="s_key">Site Key</label>
+            <input id="s_key" value="1x00000000000000000000AA" spellcheck="false">
+          </div>
+          <div class="field-row">
+            <div class="field"><label for="s_to">Timeout (s)</label><input id="s_to" type="number" min="5" max="180" value="45"></div>
+            <div class="field"><label for="s_action">Action (opt)</label><input id="s_action" placeholder="—" spellcheck="false"></div>
+          </div>
+          <div class="chiprow">
+            <span class="chip" data-preset="solve" data-url="https://example.com/" data-key="1x00000000000000000000AA">test pass</span>
+            <span class="chip" data-preset="solve" data-url="https://example.com/" data-key="2x00000000000000000000AB">test block</span>
+            <span class="chip" data-preset="solve" data-url="https://www.instveed.com/en/" data-key="0x4AAAAAAC3x1HiBz5IFyj7s">instveed</span>
+          </div>
+        </section>
 
-    <div class="card-body">
-      <section class="tab-panel active" data-panel="solve">
-        <div class="field">
-          <label for="s_url">Site URL</label>
-          <input id="s_url" value="https://example.com/" spellcheck="false">
-        </div>
-        <div class="field">
-          <label for="s_key">Site Key</label>
-          <input id="s_key" value="1x00000000000000000000AA" spellcheck="false">
-        </div>
-        <div class="field-row">
-          <div class="field"><label for="s_to">Timeout (s)</label><input id="s_to" type="number" min="5" max="180" value="45"></div>
-          <div class="field"><label for="s_action">Action (opt)</label><input id="s_action" placeholder="—" spellcheck="false"></div>
-        </div>
-        <div class="chiprow">
-          <span class="chip" data-preset="solve" data-url="https://example.com/" data-key="1x00000000000000000000AA">test sitekey (always pass)</span>
-          <span class="chip" data-preset="solve" data-url="https://example.com/" data-key="2x00000000000000000000AB">test sitekey (always block)</span>
-          <span class="chip" data-preset="solve" data-url="https://www.instveed.com/en/" data-key="0x4AAAAAAC3x1HiBz5IFyj7s">instveed</span>
-        </div>
-      </section>
+        <section class="tab-panel" data-panel="challenge">
+          <div class="field">
+            <label for="c_url">Site URL</label>
+            <input id="c_url" value="https://api.sawit.biz.id/docs" spellcheck="false">
+          </div>
+          <div class="field-row">
+            <div class="field"><label for="c_to">Timeout (s)</label><input id="c_to" type="number" min="5" max="180" value="60"></div>
+          </div>
+          <div class="chiprow">
+            <span class="chip" data-preset="challenge" data-url="https://api.sawit.biz.id/docs">sawit</span>
+            <span class="chip" data-preset="challenge" data-url="https://cobalt.meowing.de/">cobalt</span>
+            <span class="chip" data-preset="challenge" data-url="https://nopecha.com/demo/cloudflare">nopecha</span>
+          </div>
+        </section>
 
-      <section class="tab-panel" data-panel="challenge">
-        <div class="field">
-          <label for="c_url">Site URL</label>
-          <input id="c_url" value="https://api.sawit.biz.id/docs" spellcheck="false">
-        </div>
-        <div class="field-row">
-          <div class="field"><label for="c_to">Timeout (s)</label><input id="c_to" type="number" min="5" max="180" value="60"></div>
-        </div>
-        <div class="chiprow">
-          <span class="chip" data-preset="challenge" data-url="https://api.sawit.biz.id/docs">sawit /docs</span>
-          <span class="chip" data-preset="challenge" data-url="https://cobalt.meowing.de/">cobalt</span>
-          <span class="chip" data-preset="challenge" data-url="https://nopecha.com/demo/cloudflare">nopecha demo</span>
-        </div>
-      </section>
-
-      <section class="tab-panel" data-panel="raw">
-        <div class="field">
-          <label for="r_ep">Endpoint</label>
-          <select id="r_ep"><option>/solve</option><option>/solve-challenge</option></select>
-        </div>
-        <div class="field">
-          <label for="r_body">JSON body</label>
-          <textarea id="r_body" spellcheck="false">{
+        <section class="tab-panel" data-panel="raw">
+          <div class="field">
+            <label for="r_ep">Endpoint</label>
+            <select id="r_ep"><option>/solve</option><option>/solve-challenge</option></select>
+          </div>
+          <div class="field">
+            <label for="r_body">JSON body</label>
+            <textarea id="r_body" spellcheck="false">{
   "sitekey": "1x00000000000000000000AA",
   "siteurl": "https://example.com/",
   "timeout": 45
 }</textarea>
+          </div>
+        </section>
+
+        <div class="actions">
+          <button id="run_btn" class="primary">Send</button>
+          <span class="status" id="run_status">ready</span>
+          <span class="hint" id="run_hint"></span>
         </div>
-      </section>
-
-      <div class="actions">
-        <button id="run_btn" class="primary">Send request</button>
-        <span class="status" id="run_status">ready</span>
-        <span class="hint mono" id="run_hint"></span>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <section class="card response-card">
-    <header class="card-head">
-      <h2>Response</h2>
-      <div class="meta" id="meta">
-        <span class="kv"><b>status</b><em>—</em></span>
-        <span class="kv"><b>time</b><em>—</em></span>
-        <span class="kv"><b>server</b><em>—</em></span>
-        <button class="link-btn" id="copy">copy</button>
+    <section class="card events-card">
+      <header>
+        <h2>Recent events</h2>
+        <span class="mono" id="ev_count" style="font-size:11px;color:var(--mute)">no events</span>
+      </header>
+      <div class="event-list" id="events">
+        <div class="empty">No requests yet.</div>
       </div>
-    </header>
-    <pre class="out" id="out">// response appears here</pre>
-  </section>
+    </section>
+  </div>
 
-  <section class="card snippet-card">
-    <header class="card-head">
-      <h2>Code snippet</h2>
-      <nav class="tabs mono" role="tablist">
-        <button class="tab active" data-lang="curl" role="tab">curl</button>
-        <button class="tab" data-lang="node" role="tab">Node</button>
-        <button class="tab" data-lang="python" role="tab">Python</button>
-        <button class="tab" data-lang="php" role="tab">PHP</button>
-        <button class="tab" data-lang="go" role="tab">Go</button>
-      </nav>
-    </header>
-    <pre class="out" id="snip_out"><code>// pick a tab</code></pre>
-    <button class="copy-float" id="snip_copy" title="copy">copy</button>
-  </section>
+  <div class="col">
+    <section class="card">
+      <header>
+        <h2>Response</h2>
+        <div class="meta" id="meta">
+          <span class="kv"><b>status</b><em>—</em></span>
+          <span class="kv"><b>time</b><em>—</em></span>
+          <button class="pill" id="copy_resp">copy</button>
+        </div>
+      </header>
+      <pre class="out" id="out">// response appears here</pre>
+    </section>
 
-  <section class="card events-card">
-    <header class="card-head">
-      <h2>Recent events</h2>
-      <span class="sub" id="ev_count">no events</span>
-    </header>
-    <div class="event-list" id="events">
-      <div class="empty">No requests yet. Send one to see it here.</div>
-    </div>
-  </section>
+    <section class="card snippet-card">
+      <header>
+        <h2>Code</h2>
+        <div class="tabs" data-group="snippet">
+          <button class="tab active" data-lang="curl">curl</button>
+          <button class="tab" data-lang="node">Node</button>
+          <button class="tab" data-lang="python">Python</button>
+          <button class="tab" data-lang="php">PHP</button>
+          <button class="tab" data-lang="go">Go</button>
+          <button class="pill" id="copy_snip" style="margin-left:6px">copy</button>
+        </div>
+      </header>
+      <pre class="out" id="snip_out">// select preset above</pre>
+    </section>
+  </div>
 </main>
 
 <footer>Violetics Solver &middot; Turnstile + CF JS-Challenge</footer>
-<script src="/static/app.js"></script>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const BASE = `${location.protocol}//${location.host}`;
+$("h_endpoint").textContent = BASE;
+
+document.querySelectorAll(".tabs").forEach((group) => {
+  const kind = group.dataset.group;
+  group.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => {
+    group.querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
+    t.classList.add("active");
+    if (kind === "request") {
+      document.querySelectorAll(".tab-panel").forEach((x) => x.classList.remove("active"));
+      document.querySelector(`.tab-panel[data-panel="${t.dataset.tab}"]`)?.classList.add("active");
+      updateHint(); renderSnippet();
+    } else {
+      renderSnippet();
+    }
+  }));
+});
+
+document.querySelectorAll(".chip").forEach((c) => c.addEventListener("click", () => {
+  if (c.dataset.preset === "solve") {
+    $("s_url").value = c.dataset.url;
+    $("s_key").value = c.dataset.key;
+  } else if (c.dataset.preset === "challenge") {
+    $("c_url").value = c.dataset.url;
+  }
+  renderSnippet(); updateHint();
+}));
+
+function activeRequestTab() {
+  return document.querySelector('.tabs[data-group="request"] .tab.active')?.dataset.tab || "solve";
+}
+function activeLang() {
+  return document.querySelector('.tabs[data-group="snippet"] .tab.active')?.dataset.lang || "curl";
+}
+
+function getPayload() {
+  const kind = activeRequestTab();
+  if (kind === "solve") {
+    const body = {
+      sitekey: $("s_key").value.trim(),
+      siteurl: $("s_url").value.trim(),
+      timeout: parseInt($("s_to").value) || 45,
+    };
+    const act = $("s_action").value.trim();
+    if (act) body.action = act;
+    return { endpoint: "/solve", body };
+  }
+  if (kind === "challenge") {
+    return {
+      endpoint: "/solve-challenge",
+      body: {
+        siteurl: $("c_url").value.trim(),
+        timeout: parseInt($("c_to").value) || 60,
+      },
+    };
+  }
+  let body;
+  try { body = JSON.parse($("r_body").value); } catch { body = {}; }
+  return { endpoint: $("r_ep").value, body };
+}
+
+function updateHint() {
+  const { endpoint } = getPayload();
+  $("run_hint").textContent = `POST ${endpoint}`;
+}
+function setStatus(state, text) {
+  const el = $("run_status");
+  el.className = "status " + state;
+  el.innerHTML = state === "run" ? `<span class="spin"></span> ${text}` : text;
+}
+function setMeta(status, ms, serverMs) {
+  const kv = (b, e) => `<span class="kv"><b>${b}</b><em>${e}</em></span>`;
+  $("meta").innerHTML =
+    kv("status", status) +
+    kv("time", ms != null ? `${(ms / 1000).toFixed(2)}s` : "—") +
+    (serverMs != null ? kv("server", `${serverMs}s`) : "") +
+    `<button class="pill" id="copy_resp" onclick="copyResp()">copy</button>`;
+}
+window.copyResp = () => navigator.clipboard.writeText($("out").textContent).then(() => {
+  const btn = $("copy_resp"); if (!btn) return;
+  btn.textContent = "copied";
+  setTimeout(() => { btn.textContent = "copy"; }, 900);
+});
+
+async function send() {
+  const { endpoint, body } = getPayload();
+  if (activeRequestTab() !== "raw") {
+    if (!body.siteurl) { setStatus("err", "siteurl required"); return; }
+    if (endpoint === "/solve" && !body.sitekey) { setStatus("err", "sitekey required"); return; }
+  }
+  setStatus("run", "sending…"); $("run_btn").disabled = true;
+  const t0 = performance.now();
+  try {
+    const r = await fetch(BASE + endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const ct = r.headers.get("content-type") || "";
+    const data = ct.includes("json") ? await r.json() : await r.text();
+    const ms = performance.now() - t0;
+    setMeta(r.status, ms, data && data.elapsed);
+    $("out").textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+    setStatus(r.ok ? "ok" : "err", r.ok ? `ok ${r.status}` : `error ${r.status}`);
+    refreshStats();
+  } catch (e) {
+    setMeta("net-err", performance.now() - t0, null);
+    $("out").textContent = String(e);
+    setStatus("err", "network error");
+  } finally {
+    $("run_btn").disabled = false;
+  }
+}
+$("run_btn").onclick = send;
+
+function renderSnippet() {
+  const lang = activeLang();
+  const { endpoint, body } = getPayload();
+  const url = BASE + endpoint;
+  const json = JSON.stringify(body, null, 2);
+  const compact = JSON.stringify(body);
+  let code = "";
+  if (lang === "curl") {
+    code = `curl -X POST ${url} \\\n  -H 'Content-Type: application/json' \\\n  -d '${compact}'`;
+  } else if (lang === "node") {
+    code = `const res = await fetch("${url}", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(${json}),
+});
+const data = await res.json();
+console.log(data);`;
+  } else if (lang === "python") {
+    const py = json.replace(/: true/g, ": True").replace(/: false/g, ": False").replace(/: null/g, ": None");
+    code = `import requests
+
+res = requests.post(
+    "${url}",
+    json=${py},
+    timeout=${(body.timeout || 45) + 15},
+)
+res.raise_for_status()
+print(res.json())`;
+  } else if (lang === "php") {
+    code = `<?php
+$ch = curl_init("${url}");
+curl_setopt_array($ch, [
+    CURLOPT_POST => true,
+    CURLOPT_HTTPHEADER => ["Content-Type: application/json"],
+    CURLOPT_POSTFIELDS => json_encode(${phpArr(body)}),
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_TIMEOUT => ${(body.timeout || 45) + 15},
+]);
+echo curl_exec($ch);
+curl_close($ch);`;
+  } else if (lang === "go") {
+    code = `package main
+
+import (
+\t"bytes"
+\t"encoding/json"
+\t"fmt"
+\t"io"
+\t"net/http"
+)
+
+func main() {
+\tbody, _ := json.Marshal(map[string]any${goMap(body)})
+\tresp, err := http.Post("${url}", "application/json", bytes.NewReader(body))
+\tif err != nil { panic(err) }
+\tdefer resp.Body.Close()
+\tout, _ := io.ReadAll(resp.Body)
+\tfmt.Println(string(out))
+}`;
+  }
+  $("snip_out").textContent = code;
+}
+function phpArr(o) {
+  return "[" + Object.entries(o).map(([k, v]) => `"${k}" => ${typeof v === "string" ? `"${v}"` : v}`).join(", ") + "]";
+}
+function goMap(o) {
+  return "{\n" + Object.entries(o).map(([k, v]) => `\t\t"${k}": ${typeof v === "string" ? `"${v}"` : v}`).join(",\n") + ",\n\t}";
+}
+
+$("copy_snip").onclick = () => navigator.clipboard.writeText($("snip_out").textContent).then(() => {
+  $("copy_snip").textContent = "copied"; setTimeout(() => { $("copy_snip").textContent = "copy"; }, 900);
+});
+
+["s_url", "s_key", "s_to", "s_action", "c_url", "c_to", "r_ep", "r_body"].forEach((id) => {
+  $(id).addEventListener("input", () => { renderSnippet(); updateHint(); });
+  $(id).addEventListener("change", () => { renderSnippet(); updateHint(); });
+});
+
+function fmtUptime(s) {
+  if (s < 60) return `${Math.round(s)}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+  return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
+}
+function fmtMs(ms) {
+  if (!ms) return "—";
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(2)}s`;
+}
+function fmtTime(ts) {
+  return new Date(ts * 1000).toLocaleTimeString("en-GB", { hour12: false });
+}
+function pulse(id) {
+  const el = $(id); if (!el) return;
+  el.classList.add("pulse");
+  setTimeout(() => el.classList.remove("pulse"), 600);
+}
+let lastTotal = -1;
+async function refreshStats() {
+  try {
+    const r = await fetch(BASE + "/stats", { cache: "no-store" });
+    if (!r.ok) return;
+    const s = await r.json();
+    $("h_mode").textContent = s.mode + (s.proxy_url ? " → " + s.proxy_url : "");
+    $("st_uptime").textContent = fmtUptime(s.uptime);
+    $("st_inflight").textContent = s.in_flight;
+    $("st_solved").textContent = s.solved;
+    $("st_challenges").textContent = s.challenges;
+    $("st_errors").textContent = s.errors;
+    $("st_success").textContent = s.total_requests ? `${s.success_rate}%` : "—";
+    $("st_avg").textContent = fmtMs(s.latency_ms.avg);
+    $("st_p95").textContent = fmtMs(s.latency_ms.p95);
+    if (lastTotal >= 0 && s.total_requests > lastTotal) {
+      ["st_solved", "st_challenges", "st_errors", "st_success", "st_avg", "st_p95"].forEach(pulse);
+    }
+    lastTotal = s.total_requests;
+    renderEvents(s.events || []);
+  } catch {}
+}
+function renderEvents(events) {
+  $("ev_count").textContent = events.length ? `${events.length} event${events.length === 1 ? "" : "s"}` : "no events";
+  const el = $("events");
+  if (!events.length) { el.innerHTML = '<div class="empty">No requests yet.</div>'; return; }
+  el.innerHTML = events.map((e) => {
+    const ok = e.status >= 200 && e.status < 400;
+    return `<div class="event">
+      <span class="ts">${fmtTime(e.ts)}</span>
+      <span>${esc(e.endpoint)}</span>
+      <span class="st ${ok ? "ok" : "err"}">${e.status} · ${fmtMs(e.duration * 1000)}</span>
+      <span class="sum" title="${esc(e.summary)}">${esc(e.summary)}</span>
+    </div>`;
+  }).join("");
+}
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+updateHint(); renderSnippet(); refreshStats();
+setInterval(refreshStats, 3000);
+</script>
 </body>
 </html>
