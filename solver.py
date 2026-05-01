@@ -191,7 +191,40 @@ _IS_CHALLENGE_JS = """
 """
 
 
+_BOOTSTRAP_MAIN_JS = """
+(function() {
+  sessionStorage.removeItem("_tsToken");
+  sessionStorage.removeItem("_tsErr");
+  window._tsReady = function() {
+    const d = document.createElement("div");
+    d.id = "_ts_box";
+    d.style.cssText = "position:fixed;top:80px;left:80px;z-index:2147483647;width:300px;height:65px;";
+    document.body.appendChild(d);
+    try {
+      turnstile.render("#_ts_box", {
+        sitekey: "__SITEKEY__",
+        callback: (t) => { sessionStorage.setItem("_tsToken", t); },
+        "error-callback": (e) => { sessionStorage.setItem("_tsErr", String(e)); }
+      });
+    } catch (e) { sessionStorage.setItem("_tsErr", String(e)); }
+  };
+  const api = document.createElement("script");
+  api.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?onload=_tsReady&render=explicit";
+  api.async = true;
+  document.head.appendChild(api);
+})();
+"""
+
+
 async def _turnstile_on_page(page, sitekey: str, req_id: str, timeout: int) -> str:
+    """Inject Turnstile widget and return token.
+
+    Bootstrap runs in the page's MAIN world via a <script textContent=...>
+    tag (Camoufox sandboxes `page.evaluate` in an isolated world, so the
+    api.js `?onload=...` callback cannot see a function installed from
+    evaluate). MAIN and isolated worlds share sessionStorage, so we poll
+    sessionStorage from Python.
+    """
     loop = asyncio.get_event_loop()
     t0 = loop.time()
 
@@ -203,56 +236,21 @@ async def _turnstile_on_page(page, sitekey: str, req_id: str, timeout: int) -> s
     _step(req_id, f"page loaded ({loop.time() - t0:.1f}s)")
 
     _step(req_id, "injecting turnstile widget")
-    await page.evaluate(_INJECT_JS_TEMPLATE.replace("__SITEKEY__", sitekey))
-
-    try:
-        await page.wait_for_function(
-            'typeof turnstile !== "undefined" && !!document.getElementById("_ts_box")',
-            timeout=10_000,
-        )
-    except Exception:
-        raise RuntimeError("turnstile api.js did not load")
-    _step(req_id, f"turnstile ready ({loop.time() - t0:.1f}s)")
+    await page.evaluate(
+        "(src) => { const s = document.createElement('script'); s.textContent = src; document.head.appendChild(s); }",
+        _BOOTSTRAP_MAIN_JS.replace("__SITEKEY__", sitekey),
+    )
 
     deadline = t0 + timeout
-    rect = None
-    fallback_rect = {"x": 20.0, "y": 20.0, "w": 300.0, "h": 65.0}
-    clicks = 0
-    last_click = 0.0
-
     while loop.time() < deadline:
-        token = await page.evaluate(_GET_TOKEN_JS)
+        token = await page.evaluate("sessionStorage.getItem('_tsToken')")
         if token:
             _step(req_id, f"token obtained ({loop.time() - t0:.1f}s)")
             return token
-
-        if rect is None:
-            try:
-                rect = await page.evaluate(_GET_IFRAME_RECT_JS)
-                if rect:
-                    _step(req_id, f"iframe detected at ({rect['x']:.0f},{rect['y']:.0f})")
-            except Exception:
-                rect = None
-
-        now = loop.time()
-        target = rect or fallback_rect
-
-        if clicks == 0 or (now - last_click > 6 and clicks < 3):
-            cx = target["x"] + 28 + random.uniform(-3, 3)
-            cy = target["y"] + target["h"] / 2 + random.uniform(-3, 3)
-            _step(req_id, f"click #{clicks + 1} at ({cx:.0f},{cy:.0f})")
-            try:
-                await page.mouse.move(cx - 60, cy - 20)
-                await asyncio.sleep(0.05)
-                await page.mouse.move(cx, cy)
-                await asyncio.sleep(0.03)
-                await page.mouse.click(cx, cy)
-            except Exception as e:
-                _step(req_id, f"click error: {e}")
-            last_click = now
-            clicks += 1
-
-        await asyncio.sleep(0.2)
+        err = await page.evaluate("sessionStorage.getItem('_tsErr')")
+        if err:
+            raise RuntimeError(f"turnstile error: {err}")
+        await asyncio.sleep(0.5)
 
     raise TimeoutError(f"turnstile timeout after {timeout}s")
 
