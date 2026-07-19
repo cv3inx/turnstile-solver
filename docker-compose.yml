@@ -34,7 +34,10 @@ services:
     ports:
       - "9988:9988"
     environment:
-      MAX_WORKERS: "8"
+      # Concurrent solves. Each headed Camoufox tab ~150-250MB + CPU; tune to
+      # the box (4 vCPU / ~3GB free → ~12). Different sitekeys run in parallel
+      # up to this; same sitekey stays serial (CF anti-abuse).
+      MAX_WORKERS: "12"
       PORT: "9988"
       # Camoufox + byparr both egress through the WARP HTTP proxy.
       SOLVER_PROXY: "http://warp:8080"

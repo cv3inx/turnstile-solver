@@ -99,25 +99,29 @@ def _record_event(endpoint: str, status: int, duration: float, url: str, body: d
     _latency_ms.append(duration * 1000)
 
 
+# ANSI colors, disabled when NO_COLOR is set or output isn't a TTY.
+_USE_COLOR = not os.environ.get("NO_COLOR") and sys.stdout.isatty()
+
+
+def _c(code: str, s: str) -> str:
+    return f"\033[{code}m{s}\033[0m" if _USE_COLOR else s
+
+
 def _emit_start(rid: str, method: str, path: str, url: str, key: str, peer: str):
-    block = (
-        "\n「 NEW REQUEST 」"
-        f"\n» ID     : {rid}"
-        f"\n» FROM   : {peer}"
-        f"\n» {method:<6} : {path}"
-        f"\n» URL    : {url or '-'}"
-    )
-    if key:
-        block += f"\n» KEY    : {key[:14] + '...' if len(key) > 14 else key}"
-    print(block, flush=True)
+    # Verbose per-request banner only in DEBUG; at INFO one line is logged on
+    # completion (see _emit_end) so concurrent requests stay readable.
+    if log.isEnabledFor(logging.DEBUG):
+        log.debug("start %s %s %s url=%s key=%s from=%s",
+                  rid, method, path, url or "-",
+                  (key[:14] + "…") if len(key) > 14 else (key or "-"), peer)
 
 
 def _emit_end(rid: str, elapsed: float, status: int, body: dict):
-    print(
-        f"» SPEED  : {elapsed:.2f}s"
-        f"\n» STATUS : {status} - {_summary(body)}",
-        flush=True,
-    )
+    ok = 200 <= status < 400
+    icon = _c("32", "✓") if ok else _c("31", "✗")
+    stat = _c("32" if ok else "31", str(status))
+    dur = _c("33", f"{elapsed:6.2f}s")
+    print(f"{icon} {rid} {stat} {dur}  {_summary(body)}", flush=True)
 
 
 def _validate_siteurl(siteurl: str) -> None:

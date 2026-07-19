@@ -13,9 +13,10 @@ Design notes:
     hack on the .cf-turnstile div so click coordinates land on the
     invisible-mode hit area predictably. Persistent click loop until
     cf-turnstile-response is filled.
-  - Single warm browser, persistent profile. Solves serialised inside
-    the service via solve_lock (CF escalates difficulty when the same
-    sitekey is hit by multiple tabs of the same profile concurrently).
+  - Single warm browser, persistent profile. Solves are serialised
+    per-sitekey (CF escalates difficulty when the same sitekey is hit by
+    concurrent tabs of one profile); different keys run in parallel up to
+    MAX_WORKERS via a semaphore.
   - solve_challenge_async optionally delegates to a Byparr /
     FlareSolverr proxy via CHALLENGE_PROXY_URL; the in-process browser
     is the fallback.
@@ -39,8 +40,10 @@ log = logging.getLogger("solver")
 
 
 def _step(req_id: str, msg: str):
-    """One-line stdout progress log, visible between the NEW REQUEST block."""
-    print(f"  [{req_id}] {msg}", flush=True)
+    """Per-request progress trace. Only emitted at DEBUG so INFO stays to one
+    line per request even under heavy concurrency."""
+    if log.isEnabledFor(logging.DEBUG):
+        log.debug("[%s] %s", req_id, msg)
 
 
 # ---------- Profile + headless mode ----------
@@ -76,11 +79,24 @@ class BrowserSingleton:
         self._camoufox: Optional[AsyncCamoufox] = None
         self.browser = None  # playwright BrowserContext when launched with user_data_dir
         self.sem = asyncio.Semaphore(max_concurrent)
-        self.solve_lock = asyncio.Lock()
+        # Per-key locks: CF escalates difficulty when the SAME sitekey is hit
+        # by concurrent tabs of one profile, so we serialise per key — but let
+        # different keys/sites run in parallel up to the semaphore. A single
+        # global lock here would serialise everything and make sem pointless.
+        self._key_locks: dict[str, asyncio.Lock] = {}
         self.max_concurrent = max_concurrent
         self._start_lock = asyncio.Lock()
         self.solve_count = 0
         self.stopped = False
+
+    def key_lock(self, key: str) -> asyncio.Lock:
+        """Lock scoped to a sitekey/URL so same-key solves stay serial while
+        different keys run concurrently."""
+        lock = self._key_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._key_locks[key] = lock
+        return lock
 
     def _is_alive(self) -> bool:
         if self.browser is None or self.stopped:
@@ -274,7 +290,7 @@ async def solve_async(sitekey: str, siteurl: str, req_id: str = "-",
                       cdata: Optional[str] = None) -> str:
     pool = await get_pool()
     async with pool.sem:
-        async with pool.solve_lock:
+        async with pool.key_lock(sitekey):
             _step(req_id, f"opening tab for {siteurl}")
             for attempt in (1, 2):
                 page = None
@@ -451,7 +467,7 @@ async def solve_challenge_async(siteurl: str, req_id: str = "-",
 
     pool = await get_pool()
     async with pool.sem:
-        async with pool.solve_lock:
+        async with pool.key_lock(siteurl):
             _step(req_id, f"opening tab -> {siteurl}")
             for attempt in (1, 2):
                 page = None
@@ -584,7 +600,7 @@ async def solve_recaptcha_v3_async(sitekey: str, siteurl: str, req_id: str = "-"
     clean Camoufox fingerprint + WARP egress is what makes it pass."""
     pool = await get_pool()
     async with pool.sem:
-        async with pool.solve_lock:
+        async with pool.key_lock(sitekey):
             for attempt in (1, 2):
                 page = None
                 try:
@@ -622,7 +638,7 @@ async def solve_aws_token_async(siteurl: str, req_id: str = "-",
     the AWS WAF challenge JS sets once it clears. Returns the cookie + UA."""
     pool = await get_pool()
     async with pool.sem:
-        async with pool.solve_lock:
+        async with pool.key_lock(siteurl):
             for attempt in (1, 2):
                 page = None
                 try:
