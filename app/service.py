@@ -2,6 +2,7 @@
 Violetics Solver - Turnstile + CF JS-Challenge HTTP service (aiohttp).
 """
 
+import asyncio
 import collections
 import json
 import logging

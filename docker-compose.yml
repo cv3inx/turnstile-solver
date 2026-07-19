@@ -50,6 +50,7 @@ services:
       CHALLENGE_PROXY_KIND: "byparr"
     volumes:
       - solver-profile:/tmp/ts_profile
+      - solver-data:/data
     shm_size: "1gb"
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9988/health',timeout=2).status==200 else 1)"]
@@ -75,4 +76,5 @@ services:
 
 volumes:
   solver-profile:
+  solver-data:
   warp-data:

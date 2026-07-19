@@ -14,7 +14,7 @@ import os
 import sqlite3
 import time
 
-_DB_PATH = os.environ.get("DB_PATH", "/tmp/ts_profile/solver.db")
+_DB_PATH = os.environ.get("DB_PATH", "/data/solver.db")
 _conn: sqlite3.Connection | None = None
 
 
