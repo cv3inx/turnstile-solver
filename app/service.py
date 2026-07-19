@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 
 from aiohttp import web
 
+from . import db
 from .solver import (get_pool, solve_async, solve_challenge_async,
                      solve_recaptcha_v3_async, solve_aws_token_async,
                      _challenge_proxy)
@@ -24,6 +25,12 @@ MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", 64 * 1024))  # 64 KB
 # API key gate. Empty -> auth disabled (dev). Set API_KEY to require the
 # X-API-Key header (or ?api_key=) on /solve and /solve-challenge.
 API_KEY = os.environ.get("API_KEY", "").strip()
+
+# Anti-abuse (per client IP). 0 disables each check.
+RATE_LIMIT_PER_MIN = int(os.environ.get("RATE_LIMIT_PER_MIN", 10))   # requests/min/IP
+MAX_CONCURRENT_PER_IP = int(os.environ.get("MAX_CONCURRENT_PER_IP", 5))  # in-flight/IP
+# Exceeding the rate limit bans the IP for this long (seconds; default 1 day).
+BAN_SECONDS = int(os.environ.get("BAN_SECONDS", 86400))
 
 log = logging.getLogger("service")
 
@@ -107,9 +114,20 @@ def _c(code: str, s: str) -> str:
     return f"\033[{code}m{s}\033[0m" if _USE_COLOR else s
 
 
+# Per-request context stashed at start, read + cleared at end, so the single
+# completion line can show endpoint / origin / target without threading extra
+# args through every call site.
+_req_ctx: "dict[str, dict]" = {}
+
+
+def _short_ep(path: str) -> str:
+    return {"/solve": "turnstile", "/solve-challenge": "challenge",
+            "/recaptcha-v3": "recaptcha", "/aws-token": "aws-waf"}.get(path, path)
+
+
 def _emit_start(rid: str, method: str, path: str, url: str, key: str, peer: str):
-    # Verbose per-request banner only in DEBUG; at INFO one line is logged on
-    # completion (see _emit_end) so concurrent requests stay readable.
+    _req_ctx[rid] = {"ep": _short_ep(path), "url": url or "-",
+                     "key": key or "", "from": peer}
     if log.isEnabledFor(logging.DEBUG):
         log.debug("start %s %s %s url=%s key=%s from=%s",
                   rid, method, path, url or "-",
@@ -117,11 +135,19 @@ def _emit_start(rid: str, method: str, path: str, url: str, key: str, peer: str)
 
 
 def _emit_end(rid: str, elapsed: float, status: int, body: dict):
+    ctx = _req_ctx.pop(rid, {})
     ok = 200 <= status < 400
     icon = _c("32", "✓") if ok else _c("31", "✗")
     stat = _c("32" if ok else "31", str(status))
     dur = _c("33", f"{elapsed:6.2f}s")
-    print(f"{icon} {rid} {stat} {dur}  {_summary(body)}", flush=True)
+    ep = _c("36", f"{ctx.get('ep', '-'):9}")          # cyan endpoint
+    origin = _c("90", ctx.get("from", "-"))            # dim client IP
+    url = ctx.get("url", "-")
+    key = ctx.get("key", "")
+    tail = f" key={key[:10]}…" if len(key) > 10 else (f" key={key}" if key else "")
+    # ✓ 1a2b3c4d turnstile  200   3.21s  from=1.2.3.4  https://site/  key=0x4AAA…  → token …
+    print(f"{icon} {rid} {ep} {stat} {dur}  {origin}  {url}{tail}  → {_summary(body)}",
+          flush=True)
 
 
 def _validate_siteurl(siteurl: str) -> None:
@@ -159,6 +185,112 @@ async def auth_middleware(request: web.Request, handler):
             return web.json_response(
                 {"error": "unauthorized", "error_code": "unauthorized"}, status=401)
     return await handler(request)
+
+
+# Solve endpoints are the expensive ones worth protecting from abuse.
+_SOLVE_PATHS = frozenset({"/solve", "/solve-challenge", "/recaptcha-v3", "/aws-token"})
+
+# Per-IP state: sliding-window request timestamps, in-flight count, ban expiry.
+_ip_hits: "dict[str, collections.deque[float]]" = collections.defaultdict(collections.deque)
+_ip_inflight: "dict[str, int]" = collections.defaultdict(int)
+_ip_banned: "dict[str, float]" = {}  # ip -> unix ts when the ban lifts
+# In-flight asyncio tasks per IP, so a ban can cancel everything that IP has
+# running (not just reject new requests).
+_ip_tasks: "dict[str, set]" = collections.defaultdict(set)
+
+
+def _kill_ip_tasks(ip: str) -> int:
+    """Cancel every in-flight request task from an IP. Returns how many."""
+    tasks = _ip_tasks.get(ip)
+    if not tasks:
+        return 0
+    n = 0
+    for t in list(tasks):
+        if not t.done():
+            t.cancel()
+            n += 1
+    return n
+
+
+def _client_ip(request: web.Request) -> str:
+    """Real client IP. Trust the first X-Forwarded-For hop since the service
+    runs behind a reverse proxy (cf.vltcx.eu.cc)."""
+    xff = request.headers.get("X-Forwarded-For")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.remote or "-"
+
+
+@web.middleware
+async def ratelimit_middleware(request: web.Request, handler):
+    """Per-IP sliding-window rate limit + concurrent-solve cap on the solve
+    endpoints. In-memory; both checks skipped when their env var is 0."""
+    if request.path not in _SOLVE_PATHS:
+        return await handler(request)
+
+    ip = _client_ip(request)
+    now = time.time()
+
+    # Already banned? Reject until the ban lifts.
+    ban_until = _ip_banned.get(ip)
+    if ban_until:
+        if now < ban_until:
+            retry = int(ban_until - now)
+            return web.json_response(
+                {"error": "temporarily banned for abuse", "error_code": "banned",
+                 "retry_after": retry},
+                status=429, headers={"Retry-After": str(retry)})
+        _ip_banned.pop(ip, None)  # expired
+        db.clear_ban(ip)
+
+    if RATE_LIMIT_PER_MIN > 0:
+        hits = _ip_hits[ip]
+        cutoff = now - 60
+        while hits and hits[0] < cutoff:
+            hits.popleft()
+        if len(hits) >= RATE_LIMIT_PER_MIN:
+            # Over the limit -> ban the IP for BAN_SECONDS (persisted so it
+            # survives a restart) AND cancel everything it has in flight.
+            until = now + BAN_SECONDS
+            _ip_banned[ip] = until
+            db.save_ban(ip, until)
+            hits.clear()
+            killed = _kill_ip_tasks(ip)
+            log.warning("banned ip=%s for %ds (>%d req/min), killed %d in-flight",
+                        ip, BAN_SECONDS, RATE_LIMIT_PER_MIN, killed)
+            return web.json_response(
+                {"error": "temporarily banned for abuse", "error_code": "banned",
+                 "retry_after": BAN_SECONDS},
+                status=429, headers={"Retry-After": str(BAN_SECONDS)})
+        hits.append(now)
+
+    if MAX_CONCURRENT_PER_IP > 0 and _ip_inflight[ip] >= MAX_CONCURRENT_PER_IP:
+        log.warning("concurrency cap hit ip=%s (%d)", ip, MAX_CONCURRENT_PER_IP)
+        return web.json_response(
+            {"error": "too many concurrent requests", "error_code": "too_many_concurrent"},
+            status=429)
+
+    _ip_inflight[ip] += 1
+    # Run the handler as a tracked task so a mid-flight ban can cancel it.
+    task = asyncio.ensure_future(handler(request))
+    _ip_tasks[ip].add(task)
+    try:
+        return await task
+    except asyncio.CancelledError:
+        # Cancelled by a ban on this IP (not a client disconnect during a
+        # normal request — those don't register bans).
+        if _ip_banned.get(ip, 0) > time.time():
+            return web.json_response(
+                {"error": "request killed: IP banned for abuse",
+                 "error_code": "banned"}, status=429)
+        raise
+    finally:
+        _ip_tasks[ip].discard(task)
+        if not _ip_tasks[ip]:
+            _ip_tasks.pop(ip, None)
+        _ip_inflight[ip] -= 1
+        if _ip_inflight[ip] <= 0:
+            _ip_inflight.pop(ip, None)
 
 
 async def _read_payload(request: web.Request) -> dict:
@@ -491,7 +623,29 @@ async def handle_stats(request: web.Request) -> web.Response:
     })
 
 
+async def _stats_snapshot_loop():
+    """Persist counters every 30s so a restart resumes near where it left
+    off, without writing to disk on the request hot path."""
+    while True:
+        try:
+            await asyncio.sleep(30)
+            db.save_stats(_stats)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            log.exception("stats snapshot failed")
+
+
 async def on_startup(app):
+    # Persistence: load bans + prior counters so both survive a restart.
+    db.init()
+    _ip_banned.update(db.load_bans())
+    for k, v in db.load_stats().items():
+        if k in _stats:
+            _stats[k] = v
+    log.info("db loaded: %d ban(s), stats=%s", len(_ip_banned), _stats)
+    app["stats_task"] = asyncio.ensure_future(_stats_snapshot_loop())
+
     proxy_url, proxy_kind = _challenge_proxy()
     # Always warm the browser at startup — /solve still routes through
     # Camoufox even when a challenge proxy is configured. Lazy-loading the
@@ -505,6 +659,11 @@ async def on_startup(app):
 
 
 async def on_cleanup(app):
+    task = app.get("stats_task")
+    if task:
+        task.cancel()
+    db.save_stats(_stats)   # final flush
+    db.close()
     from . import solver as _s
     if _s._pool is None:
         return
@@ -527,7 +686,9 @@ def main():
         logging.getLogger(name).setLevel(logging.WARNING)
 
     app = web.Application(client_max_size=MAX_BODY_BYTES,
-                          middlewares=[auth_middleware])
+                          middlewares=[auth_middleware, ratelimit_middleware])
+    log.info("anti-abuse: rate=%s/min/ip concurrency=%s/ip",
+             RATE_LIMIT_PER_MIN or "off", MAX_CONCURRENT_PER_IP or "off")
     if API_KEY:
         print("[solver] API key auth ENABLED", flush=True)
     app.router.add_get("/", handle_playground)
